@@ -153,7 +153,7 @@ Kasal implements a sophisticated multi-tier authentication system designed for e
 
 #### Authentication Hierarchy (Priority Order):
 
-1. **OBO (On-Behalf-Of) Authentication** 🔄
+1. **OBO (On-Behalf-Of) Authentication**
    - **Location**: `src/backend/src/repositories/databricks_auth_helper.py`
    - **Header**: `X-Forwarded-Access-Token`
    - **Use Case**: Databricks Apps environment with user impersonation
@@ -166,7 +166,7 @@ Kasal implements a sophisticated multi-tier authentication system designed for e
          self._auth_method = AuthMethod.OBO_TOKEN
      ```
 
-2. **PAT (Personal Access Token) from Database** 🔐
+2. **PAT (Personal Access Token) from Database**
    - **Location**: `src/backend/src/services/api_keys_service.py`
    - **Storage**: Encrypted in database (`DATABRICKS_TOKEN`, `DATABRICKS_API_KEY`)
    - **Use Case**: Managed enterprise tokens with rotation capabilities
@@ -188,19 +188,19 @@ Kasal implements a sophisticated multi-tier memory system for persistent agent k
 
 #### Memory Types:
 
-**Short-Term Memory** 🧠
+**Short-Term Memory** 
 - **Purpose**: Recent conversation context and immediate task memory
 - **Retention**: Session-based, cleared between major task transitions
 - **Location**: `src/backend/src/engines/crewai/memory/`
 - **Vector Index**: `{catalog}.{schema}.short_term_memory_{unique_id}`
 
-**Long-Term Memory** 📚
+**Long-Term Memory** 
 - **Purpose**: Persistent knowledge across sessions and conversations
 - **Retention**: Permanent until explicitly cleared
 - **Use Cases**: Learned patterns, user preferences, domain knowledge
 - **Vector Index**: `{catalog}.{schema}.long_term_memory_{unique_id}`
 
-**Entity Memory** 👥
+**Entity Memory**
 - **Purpose**: Information about people, organizations, and key entities in results
 - **Features**: Relationship mapping, attribute tracking
 - **Vector Index**: `{catalog}.{schema}.entity_memory_{unique_id}`
@@ -220,18 +220,18 @@ crew_id = hash(agent_roles + task_names + crew_name + model + group_id)
 
 #### Plans, Tasks & Agents - Entry Point to Agentic AI
 
-**Plans** 📋
+**Plans**
 - **Definition**: High-level objectives defining what needs to be accomplished
 - **Components**: Goal description, success criteria, resource requirements
 - **Location**: `src/frontend/src/components/Plans/`
 
-**Tasks** ✅
+**Tasks**
 - **Definition**: Specific, actionable steps within a plan
 - **Properties**: Description, expected output, tools required, agent assignment
 - **Dependencies**: Task ordering and conditional execution
 - **Location**: `src/backend/src/models/task.py`
 
-**Agents** 🤖
+**Agents**
 - **Definition**: AI entities with specific roles, capabilities, and personalities
 - **Configuration**: Role definition, tool access, model selection, behavioral parameters
 - **Types**: Researcher, Analyst, Writer, Coordinator, etc.
