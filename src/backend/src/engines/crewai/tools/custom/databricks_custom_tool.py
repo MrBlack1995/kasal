@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 import asyncio
 
@@ -8,8 +10,176 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 logger = logging.getLogger(__name__)
 
+# Security audit logger for enhanced logging
+audit_logger = logging.getLogger(f"{__name__}.audit")
+
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
+
+class QueryType(enum.Enum):
+    """SQL query type classification for security filtering."""
+    SELECT = "SELECT"
+    INSERT = "INSERT" 
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+    CREATE = "CREATE"
+    DROP = "DROP"
+    ALTER = "ALTER"
+    TRUNCATE = "TRUNCATE"
+    GRANT = "GRANT"
+    REVOKE = "REVOKE"
+    SHOW = "SHOW"
+    DESCRIBE = "DESCRIBE"
+    USE = "USE"
+    UNKNOWN = "UNKNOWN"
+
+class SecurityLevel(enum.Enum):
+    """Security levels for query operations."""
+    READ_ONLY = "READ_ONLY"
+    WRITE_ALLOWED = "WRITE_ALLOWED" 
+    ADMIN_REQUIRED = "ADMIN_REQUIRED"
+
+class AuthMethod(enum.Enum):
+    """Authentication methods used."""
+    OBO_TOKEN = "OBO_TOKEN"
+    PAT_TOKEN = "PAT_TOKEN"
+    ENV_TOKEN = "ENV_TOKEN"
+    NONE = "NONE"
+
+class SQLSecurityFilter:
+    """SQL security filter to prevent destructive operations."""
+    
+    # Define destructive operations that require special permissions
+    DESTRUCTIVE_PATTERNS = [
+        r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW)',
+        r'\bDELETE\s+FROM\b',
+        r'\bTRUNCATE\s+TABLE\b',
+        r'\bALTER\s+(?:TABLE|DATABASE|SCHEMA)',
+        r'\bGRANT\b',
+        r'\bREVOKE\b',
+        r'\bCREATE\s+(?:DATABASE|SCHEMA)',
+    ]
+    
+    # Read-only operations that are always safe
+    READ_ONLY_PATTERNS = [
+        r'\bSELECT\b',
+        r'\bSHOW\s+(?:TABLES|DATABASES|SCHEMAS)',
+        r'\bDESCRIBE\b',
+        r'\bDESC\b',
+        r'\bEXPLAIN\b',
+    ]
+    
+    # Write operations that may be allowed with proper permissions
+    WRITE_PATTERNS = [
+        r'\bINSERT\s+INTO\b',
+        r'\bUPDATE\b',
+        r'\bCREATE\s+(?:TABLE|VIEW|INDEX)',
+        r'\bMERGE\s+INTO\b',
+    ]
+    
+    @classmethod
+    def classify_query(cls, query: str) -> tuple[QueryType, SecurityLevel]:
+        """
+        Classify SQL query and determine required security level.
+        
+        Args:
+            query: SQL query to classify
+            
+        Returns:
+            Tuple of (QueryType, SecurityLevel)
+        """
+        query_upper = query.upper().strip()
+        
+        # Check for destructive operations
+        for pattern in cls.DESTRUCTIVE_PATTERNS:
+            if re.search(pattern, query_upper):
+                if 'DROP' in pattern:
+                    query_type = QueryType.DROP
+                elif 'DELETE' in pattern:
+                    query_type = QueryType.DELETE
+                elif 'TRUNCATE' in pattern:
+                    query_type = QueryType.TRUNCATE
+                elif 'ALTER' in pattern:
+                    query_type = QueryType.ALTER
+                elif 'GRANT' in pattern:
+                    query_type = QueryType.GRANT
+                elif 'REVOKE' in pattern:
+                    query_type = QueryType.REVOKE
+                else:
+                    query_type = QueryType.UNKNOWN
+                return query_type, SecurityLevel.ADMIN_REQUIRED
+        
+        # Check for read-only operations
+        for pattern in cls.READ_ONLY_PATTERNS:
+            if re.search(pattern, query_upper):
+                return QueryType.SELECT, SecurityLevel.READ_ONLY
+                
+        # Check for write operations
+        for pattern in cls.WRITE_PATTERNS:
+            if re.search(pattern, query_upper):
+                if 'INSERT' in pattern:
+                    query_type = QueryType.INSERT
+                elif 'UPDATE' in pattern:
+                    query_type = QueryType.UPDATE
+                elif 'CREATE' in pattern:
+                    query_type = QueryType.CREATE
+                else:
+                    query_type = QueryType.UNKNOWN
+                return query_type, SecurityLevel.WRITE_ALLOWED
+        
+        # Default classification
+        if query_upper.startswith('SELECT'):
+            return QueryType.SELECT, SecurityLevel.READ_ONLY
+        elif query_upper.startswith('INSERT'):
+            return QueryType.INSERT, SecurityLevel.WRITE_ALLOWED
+        elif query_upper.startswith('UPDATE'):
+            return QueryType.UPDATE, SecurityLevel.WRITE_ALLOWED
+        elif query_upper.startswith('DELETE'):
+            return QueryType.DELETE, SecurityLevel.ADMIN_REQUIRED
+        elif query_upper.startswith('CREATE'):
+            return QueryType.CREATE, SecurityLevel.WRITE_ALLOWED
+        elif query_upper.startswith('DROP'):
+            return QueryType.DROP, SecurityLevel.ADMIN_REQUIRED
+        elif query_upper.startswith('ALTER'):
+            return QueryType.ALTER, SecurityLevel.ADMIN_REQUIRED
+        else:
+            return QueryType.UNKNOWN, SecurityLevel.ADMIN_REQUIRED
+
+    @classmethod
+    def is_query_allowed(cls, query: str, security_mode: str = "READ_ONLY", admin_override: bool = False) -> tuple[bool, str]:
+        """
+        Check if query is allowed based on security mode.
+        
+        Args:
+            query: SQL query to check
+            security_mode: Current security mode (READ_ONLY, WRITE_ALLOWED, ADMIN_REQUIRED)
+            admin_override: Whether admin override is enabled
+            
+        Returns:
+            Tuple of (is_allowed, reason)
+        """
+        query_type, required_level = cls.classify_query(query)
+        
+        if admin_override:
+            audit_logger.warning(f"Admin override used for query type: {query_type.value}")
+            return True, "Admin override enabled"
+        
+        if security_mode == "READ_ONLY":
+            if required_level == SecurityLevel.READ_ONLY:
+                return True, "Read-only query approved"
+            else:
+                return False, f"Query type {query_type.value} not allowed in READ_ONLY mode"
+        
+        elif security_mode == "WRITE_ALLOWED":
+            if required_level in [SecurityLevel.READ_ONLY, SecurityLevel.WRITE_ALLOWED]:
+                return True, f"Query type {query_type.value} approved for WRITE_ALLOWED mode"
+            else:
+                return False, f"Query type {query_type.value} requires ADMIN_REQUIRED mode"
+        
+        elif security_mode == "ADMIN_REQUIRED":
+            return True, f"Query type {query_type.value} approved with admin permissions"
+        
+        return False, f"Unknown security mode: {security_mode}"
 
 class DatabricksCustomToolSchema(BaseModel):
     """Input schema for DatabricksCustomTool."""
@@ -28,6 +198,12 @@ class DatabricksCustomToolSchema(BaseModel):
     )
     row_limit: Optional[int] = Field(
         1000, description="Maximum number of rows to return (default: 1000)"
+    )
+    dry_run: Optional[bool] = Field(
+        False, description="If True, validate and classify query without executing it"
+    )
+    admin_override: Optional[bool] = Field(
+        False, description="Admin override to allow restricted operations (requires admin privileges)"
     )
 
     @model_validator(mode='after')
@@ -91,11 +267,17 @@ class DatabricksCustomTool(BaseTool):
     default_schema: Optional[str] = None
     default_warehouse_id: Optional[str] = None
 
+    # Security configuration
+    security_mode: str = "READ_ONLY"  # READ_ONLY, WRITE_ALLOWED, ADMIN_REQUIRED
+    allow_admin_override: bool = False
+    enable_audit_logging: bool = True
+
     _workspace_client: Optional["WorkspaceClient"] = None
     _host: str = PrivateAttr(default=None)
     _token: str = PrivateAttr(default=None)
     _user_token: str = PrivateAttr(default=None)  # For OBO authentication
     _use_oauth: bool = PrivateAttr(default=False)  # Flag for OAuth authentication
+    _auth_method: AuthMethod = PrivateAttr(default=AuthMethod.NONE)
 
     def __init__(
         self,
@@ -106,6 +288,9 @@ class DatabricksCustomTool(BaseTool):
         tool_config: Optional[dict] = None,
         token_required: bool = True,
         user_token: str = None,
+        security_mode: str = "READ_ONLY",
+        allow_admin_override: bool = False,
+        enable_audit_logging: bool = True,
         **kwargs: Any,
     ) -> None:
         """
@@ -119,12 +304,20 @@ class DatabricksCustomTool(BaseTool):
             tool_config (Optional[dict]): Tool configuration with auth details.
             token_required (bool): Whether authentication token is required.
             user_token (str): User token for OBO authentication.
+            security_mode (str): Security mode - READ_ONLY, WRITE_ALLOWED, or ADMIN_REQUIRED.
+            allow_admin_override (bool): Whether admin override is allowed.
+            enable_audit_logging (bool): Whether to enable enhanced audit logging.
             **kwargs: Additional keyword arguments passed to BaseTool.
         """
         super().__init__(**kwargs)
         self.default_catalog = default_catalog
         self.default_schema = default_schema
         self.default_warehouse_id = default_warehouse_id
+        
+        # Security configuration
+        self.security_mode = security_mode
+        self.allow_admin_override = allow_admin_override
+        self.enable_audit_logging = enable_audit_logging
         
         if tool_config is None:
             tool_config = {}
@@ -133,6 +326,9 @@ class DatabricksCustomTool(BaseTool):
         if user_token:
             self._user_token = user_token
             self._use_oauth = True
+            self._auth_method = AuthMethod.OBO_TOKEN
+            if self.enable_audit_logging:
+                audit_logger.info(f"Authentication configured: OBO token provided, length: {len(user_token)}")
             logger.info("Using user token for OBO authentication")
         
         # Initialize databricks_host from parameter if provided
@@ -145,15 +341,24 @@ class DatabricksCustomTool(BaseTool):
             if 'user_token' in tool_config:
                 self._user_token = tool_config['user_token']
                 self._use_oauth = True
+                self._auth_method = AuthMethod.OBO_TOKEN
+                if self.enable_audit_logging:
+                    audit_logger.info(f"Authentication configured: OBO token from config, length: {len(tool_config['user_token'])}")
                 logger.info("Using user token from tool_config for OBO authentication")
             
             # Check if token is directly provided in config (fallback to PAT)
             if not self._use_oauth:
                 if 'DATABRICKS_API_KEY' in tool_config:
                     self._token = tool_config['DATABRICKS_API_KEY']
+                    self._auth_method = AuthMethod.PAT_TOKEN
+                    if self.enable_audit_logging:
+                        audit_logger.info("Authentication configured: PAT token from DATABRICKS_API_KEY in config")
                     logger.info("Using PAT token from tool_config")
                 elif 'token' in tool_config:
                     self._token = tool_config['token']
+                    self._auth_method = AuthMethod.PAT_TOKEN
+                    if self.enable_audit_logging:
+                        audit_logger.info("Authentication configured: PAT token from 'token' in config")
                     logger.info("Using PAT token from config")
             
             # Handle different possible key formats for host
@@ -271,7 +476,133 @@ class DatabricksCustomTool(BaseTool):
         """Set user access token for OBO authentication."""
         self._user_token = user_token
         self._use_oauth = True
+        self._auth_method = AuthMethod.OBO_TOKEN
+        if self.enable_audit_logging:
+            audit_logger.info(f"User token updated: OBO authentication enabled, token length: {len(user_token)}")
         logger.info("User token set for OBO authentication")
+
+    def _validate_query_security(self, query: str, admin_override: bool = False) -> tuple[bool, str, QueryType]:
+        """
+        Validate query against security policies.
+        
+        Args:
+            query: SQL query to validate
+            admin_override: Whether admin override is requested
+            
+        Returns:
+            Tuple of (is_allowed, reason, query_type)
+        """
+        # Classify the query
+        query_type, security_level = SQLSecurityFilter.classify_query(query)
+        
+        # Check if admin override is requested but not allowed
+        if admin_override and not self.allow_admin_override:
+            if self.enable_audit_logging:
+                audit_logger.warning(f"SECURITY_VIOLATION: Admin override requested but not allowed for query type: {query_type.value}")
+            return False, "Admin override requested but not permitted", query_type
+        
+        # Check query permissions
+        is_allowed, reason = SQLSecurityFilter.is_query_allowed(
+            query, 
+            self.security_mode, 
+            admin_override and self.allow_admin_override
+        )
+        
+        # Audit log the security check
+        if self.enable_audit_logging:
+            audit_logger.info(f"SECURITY_CHECK: Query type: {query_type.value}, "
+                            f"Security level required: {security_level.value}, "
+                            f"Current mode: {self.security_mode}, "
+                            f"Admin override: {admin_override}, "
+                            f"Result: {'ALLOWED' if is_allowed else 'DENIED'}, "
+                            f"Reason: {reason}")
+        
+        return is_allowed, reason, query_type
+
+    def _audit_query_execution(self, query: str, query_type: QueryType, 
+                              execution_result: str = None, error: str = None):
+        """
+        Audit log query execution details.
+        
+        Args:
+            query: SQL query executed
+            query_type: Classified query type
+            execution_result: Result of execution (if successful)
+            error: Error message (if failed)
+        """
+        if not self.enable_audit_logging:
+            return
+        
+        # Mask sensitive parts of the query for logging
+        masked_query = query[:100] + "..." if len(query) > 100 else query
+        
+        audit_entry = {
+            "auth_method": self._auth_method.value,
+            "query_type": query_type.value,
+            "security_mode": self.security_mode,
+            "host": self._host,
+            "masked_query": masked_query,
+            "query_length": len(query),
+            "execution_status": "SUCCESS" if execution_result else "ERROR",
+        }
+        
+        if error:
+            audit_entry["error"] = error[:200]  # Limit error message length
+        
+        if execution_result:
+            # Count result rows for audit
+            try:
+                row_count = execution_result.count('\n') - 2 if '\n' in execution_result else 0
+                audit_entry["result_rows"] = max(0, row_count)
+            except:
+                audit_entry["result_rows"] = "unknown"
+        
+        audit_logger.info(f"QUERY_EXECUTION: {audit_entry}")
+
+    def _perform_dry_run(self, query: str) -> str:
+        """
+        Perform a dry run of the query - validate and classify without executing.
+        
+        Args:
+            query: SQL query to analyze
+            
+        Returns:
+            Analysis result as formatted string
+        """
+        try:
+            # Parse and classify the query
+            query_type, security_level = SQLSecurityFilter.classify_query(query)
+            
+            # Check permissions
+            is_allowed, reason = SQLSecurityFilter.is_query_allowed(query, self.security_mode)
+            
+            # Format the dry run result
+            result = f"""
+DRY RUN ANALYSIS:
+==================
+Query Type: {query_type.value}
+Security Level Required: {security_level.value}
+Current Security Mode: {self.security_mode}
+Permission Check: {'✅ ALLOWED' if is_allowed else '❌ DENIED'}
+Reason: {reason}
+
+Query Preview: {query[:200]}{'...' if len(query) > 200 else ''}
+
+Authentication: {self._auth_method.value}
+Host: {self._host}
+"""
+            
+            if self.enable_audit_logging:
+                audit_logger.info(f"DRY_RUN: Query type: {query_type.value}, "
+                                f"Allowed: {is_allowed}, Reason: {reason}")
+            
+            return result.strip()
+            
+        except Exception as e:
+            error_msg = f"Dry run analysis failed: {str(e)}"
+            if self.enable_audit_logging:
+                audit_logger.error(f"DRY_RUN_ERROR: {error_msg}")
+            return error_msg
 
     async def _get_auth_headers(self) -> dict:
         """Get authentication headers using proper OBO implementation."""
@@ -537,20 +868,27 @@ class DatabricksCustomTool(BaseTool):
             db_schema (Optional[str]): Databricks schema name
             warehouse_id (Optional[str]): SQL warehouse ID
             row_limit (Optional[int]): Maximum number of rows to return
+            dry_run (Optional[bool]): If True, validate query without executing
+            admin_override (Optional[bool]): Admin override for restricted operations
 
         Returns:
-            str: Formatted query results
+            str: Formatted query results or security analysis
         """
         try:
             # Check if authentication is available
             if not self._use_oauth and not self._token and not self._user_token:
-                return "Error: Cannot execute query - no authentication available. Please configure authentication or use Databricks Apps."
+                error_msg = "Error: Cannot execute query - no authentication available. Please configure authentication or use Databricks Apps."
+                if self.enable_audit_logging:
+                    audit_logger.error(f"AUTHENTICATION_ERROR: No authentication available")
+                return error_msg
             # Get parameters with fallbacks to default values
             query = kwargs.get("query")
             catalog = kwargs.get("catalog") or self.default_catalog
             db_schema = kwargs.get("db_schema") or self.default_schema
             warehouse_id = kwargs.get("warehouse_id") or self.default_warehouse_id
             row_limit = kwargs.get("row_limit", 1000)
+            dry_run = kwargs.get("dry_run", False)
+            admin_override = kwargs.get("admin_override", False)
 
             # Validate schema and query
             validated_input = DatabricksCustomToolSchema(
@@ -558,8 +896,25 @@ class DatabricksCustomTool(BaseTool):
                 catalog=catalog,
                 db_schema=db_schema,
                 warehouse_id=warehouse_id,
-                row_limit=row_limit
+                row_limit=row_limit,
+                dry_run=dry_run,
+                admin_override=admin_override
             )
+            
+            # Security validation
+            is_allowed, security_reason, query_type = self._validate_query_security(
+                validated_input.query, validated_input.admin_override
+            )
+            
+            # Handle dry run mode
+            if validated_input.dry_run:
+                return self._perform_dry_run(validated_input.query)
+            
+            # Block execution if query is not allowed
+            if not is_allowed:
+                error_msg = f"SECURITY VIOLATION: {security_reason}"
+                self._audit_query_execution(validated_input.query, query_type, error=error_msg)
+                return error_msg
 
             # Extract validated parameters
             query = validated_input.query
@@ -1083,16 +1438,33 @@ class DatabricksCustomTool(BaseTool):
             if not chunk_results and hasattr(result, 'status'):
                 state_value = str(result.status.state)
                 if "SUCCEEDED" in state_value:
-                    return "Query executed successfully (no results to display)"
+                    success_msg = "Query executed successfully (no results to display)"
+                    self._audit_query_execution(validated_input.query, query_type, execution_result=success_msg)
+                    return success_msg
 
             # Format and return results
-            return self._format_results(chunk_results)
+            formatted_results = self._format_results(chunk_results)
+            
+            # Audit log successful execution
+            self._audit_query_execution(validated_input.query, query_type, execution_result=formatted_results)
+            
+            return formatted_results
 
         except Exception as e:
             # Include more details in the error message to help with debugging
             import traceback
             error_details = traceback.format_exc()
-            return f"Error executing Databricks query: {str(e)}\n\nDetails:\n{error_details}"
+            error_msg = f"Error executing Databricks query: {str(e)}\n\nDetails:\n{error_details}"
+            
+            # Audit log failed execution
+            if 'query_type' in locals():
+                self._audit_query_execution(
+                    kwargs.get("query", ""), 
+                    query_type, 
+                    error=error_msg
+                )
+            
+            return error_msg
 
     def _execute_single_statement(self, statement: str, catalog: str, db_schema: str, warehouse_id: str) -> str:
         """
