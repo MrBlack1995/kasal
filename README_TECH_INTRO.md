@@ -242,19 +242,19 @@ crew_id = hash(agent_roles + task_names + crew_name + model + group_id)
 Plan → Task Breakdown → Agent Assignment → Tool Selection → Execution → Memory Storage
 ```
 **Frontend Responsibilities**:
-- **Plan** 🎯 - UI for creating/editing high-level objectives (`src/frontend/src/components/Plans/`)
-- **Task Breakdown** ✂️ - Visual task designer with dependency management (`src/frontend/src/components/Tasks/`)
-- **Agent Assignment** 🤖 - Agent configuration wizard and role assignment (`src/frontend/src/components/Agents/`)
-- **Tool Selection** 🛠️ - Tool picker interface and configuration dialogs (`src/frontend/src/components/Tools/`)
+- **Plan** - UI for creating/editing high-level objectives (`src/frontend/src/components/Plans/`)
+- **Task Breakdown** - Visual task designer with dependency management (`src/frontend/src/components/Tasks/`)
+- **Agent Assignment** - Agent configuration wizard and role assignment (`src/frontend/src/components/Agents/`)
+- **Tool Selection** - Tool picker interface and configuration dialogs (`src/frontend/src/components/Tools/`)
 
 **Backend Responsibilities**:
-- **Execution** ⚡ - CrewAI orchestration, agent coordination, background processing (`src/backend/src/engines/crewai/`)
-- **Memory Storage** 🧠 - Vector search operations, persistence to Databricks indexes (`src/backend/src/repositories/databricks_vector_*`)
+- **Execution** - CrewAI orchestration, agent coordination, background processing (`src/backend/src/engines/crewai/`)
+- **Memory Storage** - Vector search operations, persistence to Databricks indexes (`src/backend/src/repositories/databricks_vector_*`)
 
 **Shared Responsibilities**:
-- **Real-time Monitoring** 📊 - Frontend displays execution progress via WebSocket, backend streams execution events
-- **Configuration Validation** ✅ - Frontend validates UI inputs, backend validates execution parameters
-- **State Synchronization** 🔄 - Frontend manages UI state, backend persists workflow configurations to database
+- **Real-time Monitoring** - Frontend displays execution progress via WebSocket, backend streams execution events
+- **Configuration Validation** - Frontend validates UI inputs, backend validates execution parameters
+- **State Synchronization** - Frontend manages UI state, backend persists workflow configurations to database
 
 The frontend handles all configuration and visualization, while the backend handles all execution and persistence.
 
@@ -350,18 +350,18 @@ The below list contains the most important components, but doesn't comprise a fu
 
 ### Multi-Agent Orchestration Framework
 
-**CrewAI Engine Service** 🤖
+**CrewAI Engine Service**
 - **Location**: `src/backend/src/engines/crewai/crewai_engine_service.py`
 - **Purpose**: Main orchestration service for multi-agent workflows
 - **Key Features**: Agent coordination, task delegation, conversation management
 - **Configuration**: Dynamic agent and task configuration from frontend UI
 
-**Configuration Adapter** ⚙️
+**Configuration Adapter**
 - **Location**: `src/backend/src/engines/crewai/configuration_adapter.py`
 - **Purpose**: Transforms frontend configurations to CrewAI framework format
 - **Responsibilities**: Schema validation, model mapping, tool assignment
 
-**Execution Runner** 🏃‍♂️
+**Execution Runner**
 - **Location**: `src/backend/src/engines/crewai/execution_runner.py`
 - **Purpose**: Manages async execution workflows with progress tracking
 - **Features**: Background processing, real-time status updates, error handling
@@ -375,12 +375,12 @@ The below list contains the most important components, but doesn't comprise a fu
 ## Tool System & MCP Integration
 
 ### Dynamic Tool Factory
-**Tool Factory** 🔧
+**Tool Factory**
 - **Location**: `src/backend/src/engines/crewai/tools/tool_factory.py`
 - **Purpose**: Extensible tool system with dynamic instantiation
 - **Architecture**: Plugin-based tool discovery and configuration
 
-**Custom Tools** 🛠️
+**Custom Tools**
 - **Databricks Custom Tool**: `src/backend/src/engines/crewai/tools/custom/databricks_custom_tool.py`
   - SQL query execution with security filtering
   - Vector search operations
@@ -396,7 +396,7 @@ The below list contains the most important components, but doesn't comprise a fu
 ## Streaming & Real-time Features
 
 ### Execution Streaming
-**Background Execution** ⚡
+**Background Execution**
 - **Location**: `src/backend/src/services/execution_service.py`
 - **Purpose**: Async task execution with real-time progress streaming
 - **Features**: WebSocket updates, progress tracking, cancellation support
@@ -442,7 +442,7 @@ DATABRICKS_MODEL_SERVING_ENDPOINT=https://xxx.databricks.com
 ## Background Task Processing
 
 ### Async Execution Architecture
-**Execution Management** ⏱️
+**Execution Management** 
 - **Pattern**: FastAPI BackgroundTasks for non-blocking operations
 - **Monitoring**: Real-time status tracking with WebSocket updates
 - **Scalability**: Horizontal scaling with shared database state
@@ -501,7 +501,7 @@ DATABRICKS_MODEL_SERVING_ENDPOINT=https://xxx.databricks.com
 ## Performance & Scalability
 
 ### Architecture Scalability
-**Horizontal Scaling** 📈
+**Horizontal Scaling**
 - **Stateless Design**: All application state stored in database
 - **Database Scaling**: SQLite for development, PostgreSQL for production
 - **Memory Scaling**: Distributed vector storage with Databricks Vector Search
