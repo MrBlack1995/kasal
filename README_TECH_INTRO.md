@@ -1,5 +1,27 @@
 # Kasal - AI Agent Workflow Orchestration Platform
 
+**Table of Contents:**
+- [Overview](#overview)
+- [Architecture Overview](#architecture-overview)
+- [Component Details with Repository Locations](#component-details-with-repository-locations)
+   - [Frontend Components](#frontend-components)
+   - [Backend Components](#backend-components)
+- [Core Components](#core-components)
+   - [1. Authentication Workflow](#1-authentication-workflow)
+   - [2. Memory Architecture](#2-memory-architecture)
+   - [3. Agent Workflow Components](#3-agent-workflow-components)
+   - [4. Database Schema (app.db)](#4-database-schema-appdb)
+- [Technology Stack](#technology-stack)
+- [Key File Locations](#key-file-locations)
+- [CrewAI Engine Integration Details](#crewai-engine-integration-details)
+- [Tool System & MCP Integration](#tool-system--mcp-integration)
+- [Streaming & Real-time Features](#streaming--real-time-features)
+- [Configuration Management](#configuration-management)
+- [Background Task Processing](#background-task-processing)
+- [Logging & Monitoring System](#logging--monitoring-system)
+- [API Design & Versioning](#api-design--versioning)
+- [Performance & Scalability](#performance--scalability)
+
 ## Overview
 
 Kasal is a sophisticated AI agent workflow orchestration platform built with a clean architecture pattern, designed to enable users to create, manage, and execute complex AI agent workflows. The platform combines React-based frontend interfaces with a robust FastAPI backend, leveraging CrewAI for agent orchestration and Databricks for enterprise-grade AI capabilities.
