@@ -266,37 +266,37 @@ The SQLite database (`app.db`) contains several key tables for system operation:
 #### Core Tables:
 The below list contains the most important components, but doesn't comprise a full list. The key idea is to get an overview of the architectural setup of the key database configurations.
 
-**execution_logs** 📊
+**execution_logs**
 - **Purpose**: Detailed logs of background execution processes
 - **Location**: `src/backend/src/models/execution_log.py`
 - **Fields**: `execution_id`, `timestamp`, `level`, `message`, `context`
 
-**execution_trace** 🔍
+**execution_trace**
 - **Purpose**: Timeline tracking of API requests and system traces
 - **Location**: `src/backend/src/models/execution_trace.py`
 - **Fields**: `trace_id`, `span_id`, `operation`, `duration`, `metadata`
 
-**chat_history** 💬
+**chat_history**
 - **Purpose**: Conversation history between users and agents
 - **Location**: `src/backend/src/models/chat_history.py`
 - **Fields**: `session_id`, `user_id`, `message`, `response`, `timestamp`
 
-**crews** 👥
+**crews**
 - **Purpose**: Historical crew configurations created by users/groups
 - **Location**: `src/backend/src/models/crew.py`
 - **Fields**: `crew_id`, `name`, `agents`, `tasks`, `configuration`, `created_by`
 
-**execution_history** 🗃️
+**execution_history**
 - **Purpose**: Housekeeping table for execution metadata and cleanup
 - **Location**: `src/backend/src/models/execution_history.py`
 - **Fields**: `execution_id`, `status`, `start_time`, `end_time`, `resource_usage`
 
-**memory_backend** 🧠
+**memory_backend**
 - **Purpose**: Configuration for different memory storage backends
 - **Location**: `src/backend/src/models/memory_backend.py`
 - **Fields**: `backend_id`, `type`, `configuration`, `group_id`, `enabled`
 
-**users** 👤
+**users**
 - **Purpose**: User account and profile information
 - **Location**: `src/backend/src/models/user.py`
 - **Fields**: `user_id`, `email`, `groups`, `preferences`, `permissions`
@@ -311,7 +311,7 @@ The below list contains the most important components, but doesn't comprise a fu
 - **Build Tool**: Create React App with custom configurations
 
 ### Backend
-- **Framework**: FastAPI 🚀
+- **Framework**: FastAPI
 - **ORM**: SQLAlchemy 2.0 with Alembic migrations
 - **AI Engine**: CrewAI framework for agent orchestration
 - **Database**: SQLite (development) / PostgreSQL (production)
