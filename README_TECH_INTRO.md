@@ -161,11 +161,11 @@ The Repository Layer provides data access connectors to external services (Datab
 
 #### **ORM Layer:**
 The ORM (Object Relationship Model) defines the database structure and data models (and their core functionaltieis) for tracking and handling logs, keys, execution history, and other persistent data. Some key tables and functionaltities handled include: 
-- User Model: src/backend/src/models/user.py - User profiles, authentication details, group memberships, and permissions
-- Execution Log Model: src/backend/src/models/execution_log.py - Detailed logs of crew executions, agent activities, and system events
-- Memory Backend Model: src/backend/src/models/memory_backend.py - Vector search configurations, index mappings, and memory type settings
-- Crew Model: src/backend/src/models/crew.py - Crew configurations, agent definitions, task assignments, and execution parameters
-- Chat History Model: src/backend/src/models/chat_history.py - Conversation threads, message history, and user interaction tracking
+- **User Model**: `src/backend/src/models/user.py` - User profiles, authentication details, group memberships, and permissions
+- **Execution Log Model**: `src/backend/src/models/execution_log.py` - Detailed logs of crew executions, agent activities, and system events
+- **Memory Backend Model**: `src/backend/src/models/memory_backend.py` - Vector search configurations, index mappings, and memory type settings
+- **Crew Model**: `src/backend/src/models/crew.py` - Crew configurations, agent definitions, task assignments, and execution parameters
+- **Chat History Model**: `src/backend/src/models/chat_history.py` - Conversation threads, message history, and user interaction tracking
 
 ## Core Components
 
