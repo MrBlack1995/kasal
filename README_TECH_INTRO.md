@@ -103,7 +103,7 @@ Below is a semi-detailed architecture of the most important architectural compon
                 │ • chat_history   │            │ • MLflow        │
                 │ • crews          │            │ • Unity Catalog │
                 │ • memory_backend │            │ • Volumes       │
-                │ • users          │            │ • MCP Servers   │
+                │ • ...            │            │ • ...           │
                 └──────────────-───┘            └─────────────────┘
 ```
 
