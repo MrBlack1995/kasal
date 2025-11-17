@@ -10,6 +10,16 @@ from converters.models.kbi import (
     SQLMeasure,
     UCMetric,
 )
+from converters.models.sql_models import (
+    SQLDialect,
+    SQLAggregationType,
+    SQLJoinType,
+    SQLQuery,
+    SQLStructure,
+    SQLDefinition,
+    SQLTranslationOptions,
+    SQLTranslationResult,
+)
 
 __all__ = [
     "KBI",
@@ -20,4 +30,12 @@ __all__ = [
     "DAXMeasure",
     "SQLMeasure",
     "UCMetric",
+    "SQLDialect",
+    "SQLAggregationType",
+    "SQLJoinType",
+    "SQLQuery",
+    "SQLStructure",
+    "SQLDefinition",
+    "SQLTranslationOptions",
+    "SQLTranslationResult",
 ]

@@ -1,4 +1,4 @@
-"""Conversion rules and mappings"""
+"""Translators and resolvers for formulas and filters"""
 
 from converters.rules.translators.filter_resolver import FilterResolver
 from converters.rules.translators.formula_translator import FormulaTranslator

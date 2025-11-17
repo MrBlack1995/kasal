@@ -16,10 +16,20 @@ The package is organized into:
 - utils: Helper utilities for conversion operations
 """
 
-from converters.base.base_converter import BaseConverter
+from converters.base.base_converter import BaseConverter, ConversionFormat
 from converters.base.converter_factory import ConverterFactory
+from converters.implementations.yaml_to_dax import YAMLToDAXConverter
+from converters.implementations.yaml_to_sql import YAMLToSQLConverter
+from converters.implementations.yaml_to_uc_metrics import YAMLToUCMetricsConverter
+
+# Import registry to auto-register all converters
+import converters.registry  # noqa: F401
 
 __all__ = [
     "BaseConverter",
+    "ConversionFormat",
     "ConverterFactory",
+    "YAMLToDAXConverter",
+    "YAMLToSQLConverter",
+    "YAMLToUCMetricsConverter",
 ]
