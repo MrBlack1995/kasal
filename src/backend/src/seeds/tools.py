@@ -24,6 +24,9 @@ tools_data = [
     (36, "DatabricksKnowledgeSearchTool", "A powerful knowledge search tool that enables semantic search across documents uploaded to Databricks Vector Search. It provides RAG (Retrieval-Augmented Generation) capabilities by searching through indexed documents based on vector similarity. This tool allows agents to access and retrieve relevant information from uploaded knowledge files including PDFs, Word documents, text files, and other document formats. Essential for building context-aware AI applications with access to custom knowledge bases.", "search"),
     (69, "MCPTool", "An advanced adapter for Model Context Protocol (MCP) servers that enables access to thousands of specialized tools from the MCP ecosystem. This tool establishes and manages connections with MCP servers through SSE (Server-Sent Events), providing seamless integration with community-built tool collections. Perfect for extending agent capabilities with domain-specific tools without requiring custom development or direct integration work.", "integration"),
     (70, "DatabricksJobsTool", "A comprehensive Databricks Jobs management tool using direct REST API calls for optimal performance. IMPORTANT WORKFLOW: Always use 'get_notebook' action FIRST to analyze job notebooks and understand required parameters before running any job with custom parameters. This ensures proper parameter construction and prevents job failures. Available actions: (1) 'list' - List all jobs in workspace with optional name/ID filtering, (2) 'list_my_jobs' - List only jobs created by current user, (3) 'get' - Get detailed job configuration and recent run history, (4) 'get_notebook' - Analyze notebook content to understand parameters, widgets, and logic (REQUIRED before running jobs with parameters), (5) 'run' - Trigger job execution with custom parameters (use dict for notebook/SQL tasks, list for Python tasks), (6) 'monitor' - Track real-time execution status and task progress, (7) 'create' - Create new jobs with custom configurations. The tool provides intelligent parameter analysis, suggesting proper parameter structures based on notebook patterns (search jobs, ETL jobs, etc.). Supports OAuth/OBO authentication, PAT tokens, and Databricks CLI profiles. All operations use direct REST API calls avoiding SDK overhead for faster execution. Essential for automating data pipelines, orchestrating workflows, and integrating Databricks jobs into AI agent systems.", "database"),
+    (71, "YAMLToDAXTool", "A specialized converter that transforms YAML-based KPI (Key Performance Indicator) definitions into DAX (Data Analysis Expressions) formulas for Power BI. This tool parses YAML measure definitions and generates production-ready DAX measures with proper aggregations, filters, and time intelligence. Features include: automatic aggregation detection (SUM, AVERAGE, COUNT, etc.), filter and query filter resolution with variable substitution, time intelligence structure processing (YTD, QTD, MTD, etc.), exception handling and exception aggregation support, and dependency resolution for nested measures. Perfect for migrating business metrics from YAML specifications to Power BI semantic models, automating DAX formula generation for analytics teams, and standardizing measure definitions across reporting platforms.", "conversion"),
+    (72, "YAMLToSQLTool", "A powerful multi-dialect SQL converter that translates YAML-based KPI definitions into SQL queries compatible with various database platforms. Supports multiple SQL dialects including Databricks, PostgreSQL, MySQL, SQL Server, Snowflake, BigQuery, and standard SQL. The tool generates optimized SQL queries with proper aggregations (SUM, AVG, COUNT, etc.), filter clause generation with WHERE/HAVING conditions, time intelligence structures (YTD, rolling periods, etc.), window functions and CTEs for complex calculations, and dialect-specific optimizations. Features include configurable comment generation for documentation, structure expansion for time-based measures, and proper handling of exceptions and weighted aggregations. Ideal for translating business logic to data warehouse queries, generating SQL views from KPI specifications, and creating standardized metric definitions across multiple database platforms.", "conversion"),
+    (73, "YAMLToUCMetricsTool", "A specialized tool for converting YAML-based KPI definitions into Databricks Unity Catalog Metrics Store format. This tool bridges the gap between business metric definitions and Databricks lakehouse metrics, generating Unity Catalog-compatible metric definitions with proper lineage tracking, catalog/schema organization, and metadata preservation. Features include: Unity Catalog catalog and schema support for proper namespace organization, metrics definition generation with SQL expressions, structure processing for time intelligence calculations, metadata and description preservation from YAML definitions, and integration with Unity Catalog governance features. The tool generates JSON-formatted metric definitions ready for deployment to Unity Catalog, enabling centralized metric governance, lineage tracking across data pipelines, and standardized business logic in Databricks environments. Essential for organizations adopting Unity Catalog for centralized data governance and wanting to maintain consistent metric definitions across their lakehouse architecture.", "conversion"),
 ]
 
 def get_tool_configs():
@@ -81,7 +84,23 @@ def get_tool_configs():
         "70": {
             "result_as_answer": False,
             "DATABRICKS_HOST": "",  # Databricks workspace URL (e.g., "e2-demo-field-eng.cloud.databricks.com")
-        }   # DatabricksJobsTool
+        },   # DatabricksJobsTool
+        "71": {
+            "process_structures": True,  # Whether to process time intelligence structures (YTD, QTD, etc.)
+            "result_as_answer": False
+        },   # YAMLToDAXTool
+        "72": {
+            "dialect": "databricks",  # SQL dialect: databricks, postgresql, mysql, sqlserver, snowflake, bigquery, standard
+            "process_structures": True,  # Whether to process time intelligence structures
+            "include_comments": True,  # Include descriptive comments in SQL output
+            "result_as_answer": False
+        },   # YAMLToSQLTool
+        "73": {
+            "process_structures": True,  # Whether to process time intelligence structures
+            "catalog": "",  # Unity Catalog catalog name (optional)
+            "schema_name": "",  # Unity Catalog schema name (optional)
+            "result_as_answer": False
+        }   # YAMLToUCMetricsTool
     }
 
 async def seed_async():
@@ -99,7 +118,7 @@ async def seed_async():
     tools_error = 0
 
     # List of tool IDs that should be enabled
-    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 69, 70]
+    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 69, 70, 71, 72, 73]
 
     for tool_id, title, description, icon in tools_data:
         try:
@@ -162,7 +181,7 @@ def seed_sync():
     tools_error = 0
 
     # List of tool IDs that should be enabled
-    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 69, 70]
+    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 69, 70, 71, 72, 73]
 
     for tool_id, title, description, icon in tools_data:
         try:

@@ -1,9 +1,33 @@
-"""Base classes and factory for converters"""
+"""Base classes, factory, and core models for converters"""
 
-from converters.base.base_converter import BaseConverter
-from converters.base.converter_factory import ConverterFactory
+# Framework classes
+from converters.base.converter import BaseConverter, ConversionFormat
+from converters.base.factory import ConverterFactory
+
+# Core data models
+from converters.base.models import (
+    KPI,
+    KPIDefinition,
+    KPIFilter,
+    Structure,
+    QueryFilter,
+    DAXMeasure,
+    SQLMeasure,
+    UCMetric,
+)
 
 __all__ = [
+    # Framework
     "BaseConverter",
+    "ConversionFormat",
     "ConverterFactory",
+    # Core Models
+    "KPI",
+    "KPIDefinition",
+    "KPIFilter",
+    "Structure",
+    "QueryFilter",
+    "DAXMeasure",
+    "SQLMeasure",
+    "UCMetric",
 ]
