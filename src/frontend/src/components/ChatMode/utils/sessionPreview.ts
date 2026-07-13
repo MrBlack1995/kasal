@@ -43,17 +43,47 @@ async function fetchResult(jobId: string): Promise<unknown> {
 export async function deriveSessionPreviews(
   messages: ChatMessage[],
 ): Promise<{ history: PreviewContent[]; current: PreviewContent | null }> {
-  const jobIds: string[] = [];
+  // Prefetch every result this session will need IN PARALLEL. The single
+  // sequential loop below used to await each run's full-result GET one at a
+  // time — switching to a 5-run session paid 5 serial round-trips before the
+  // preview appeared. Mirrors the loop's rules: only the FIRST message per
+  // run counts, and a message-local surface makes the fetch unnecessary.
+  const prefetchSeen = new Set<string>();
+  const toFetch: string[] = [];
   for (const m of messages) {
-    if (m.executionId && !jobIds.includes(m.executionId)) jobIds.push(m.executionId);
+    if (!m.executionId || prefetchSeen.has(m.executionId)) continue;
+    prefetchSeen.add(m.executionId);
+    const hasLocal = m.resultType === 'a2ui' && m.resultData != null && toSurface(m.resultData) != null;
+    if (!hasLocal) toFetch.push(m.executionId);
   }
+  await Promise.all(toFetch.map((jobId) => fetchResult(jobId)));
 
+  const seen = new Set<string>();
   const history: PreviewContent[] = [];
-  for (const jobId of jobIds) {
-    const result = await fetchResult(jobId);
-    if (!result) continue;
-    const surface = toSurface(result);
-    if (surface) history.push({ type: 'ui', data: JSON.stringify(surface) });
+  for (const m of messages) {
+    // Prefer the surface persisted ON the message (`resultData` round-trips
+    // through the session API and carries any user restyle `theme`) over the
+    // pristine execution.result — otherwise a "Customize → Look" palette is
+    // lost on every session switch. Gated on the a2ui card type so crew cards /
+    // trace payloads are never mistaken for a deliverable.
+    const local = m.resultType === 'a2ui' && m.resultData != null ? toSurface(m.resultData) : null;
+    if (m.executionId) {
+      if (seen.has(m.executionId)) continue;
+      seen.add(m.executionId);
+      let surface = local;
+      if (!surface) {
+        const result = await fetchResult(m.executionId);
+        if (result) surface = toSurface(result);
+      }
+      if (surface) {
+        history.push({ type: 'ui', data: JSON.stringify(surface), sourceMessageId: m.id });
+      }
+    } else if (local) {
+      // An a2ui card with NO run anchor: an envelope-clobbered row (an old
+      // partial update stripped executionId). Its surface — including any
+      // restyle theme — is still the deliverable; don't drop it.
+      history.push({ type: 'ui', data: JSON.stringify(local), sourceMessageId: m.id });
+    }
   }
 
   return { history, current: history.length ? history[history.length - 1] : null };

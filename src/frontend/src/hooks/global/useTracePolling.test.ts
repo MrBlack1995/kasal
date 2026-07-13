@@ -24,6 +24,7 @@ const runStatusState = {
   sseConnected: false,
   handleSSEUpdate: vi.fn(),
   addTrace: vi.fn(),
+  addTraces: vi.fn(),
 };
 vi.mock('../../store/runStatus', () => ({
   useRunStatusStore: { getState: () => runStatusState },
@@ -198,4 +199,159 @@ describe('useTracePolling - gone job (404 loop)', () => {
 
     expect(execProbeCount()).toBeGreaterThan(before); // still polling the active job
   });
+});
+
+describe('useTracePolling - since_id cursor', () => {
+  it('advances since_id to the highest seen trace id (regression: offset polls re-shipped the whole trace set)', async () => {
+    let traceCall = 0;
+    apiGet.mockImplementation((url: string) => {
+      if (url === `/executions/${JOB}`) return Promise.resolve({ data: { status: 'running' } });
+      if (url === `/traces/job/${JOB}`) {
+        traceCall += 1;
+        if (traceCall === 1) {
+          return Promise.resolve({ data: { traces: [{ id: 5 }, { id: 7 }] } });
+        }
+        return Promise.resolve({ data: { traces: [] } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    renderHook(() => useTracePolling());
+    window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const traceRequests = apiGet.mock.calls
+      .filter(([url]) => url === `/traces/job/${JOB}`)
+      .map(([, cfg]) => (cfg as { params?: Record<string, number> })?.params);
+    expect(traceRequests[0]).toEqual({ limit: 50, since_id: 0 });
+    expect(traceRequests[1]).toEqual({ limit: 50, since_id: 7 });
+  });
+});
+
+describe('useTracePolling - task-states gating by run type', () => {
+  const taskStateCount = () =>
+    apiGet.mock.calls.filter(([url]) => url === `/traces/job/${JOB}/task-states`).length;
+
+  it('skips the per-tick task-states request for agent (ChatMode) runs', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === `/executions/${JOB}`) {
+        return Promise.resolve({ data: { status: 'running', execution_type: 'agent' } });
+      }
+      return Promise.resolve({ data: { traces: [] } });
+    });
+
+    renderHook(() => useTracePolling());
+    window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // The first tick may probe before execution_type is known; after that,
+    // agent runs must not generate task-states requests (nothing consumes
+    // taskExecutionStore for ChatMode).
+    expect(taskStateCount()).toBeLessThanOrEqual(1);
+  });
+
+  it('keeps polling task-states for crew runs', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === `/executions/${JOB}`) {
+        return Promise.resolve({ data: { status: 'running', execution_type: 'crew' } });
+      }
+      if (url === `/traces/job/${JOB}/task-states`) {
+        return Promise.resolve({ data: {} });
+      }
+      return Promise.resolve({ data: { traces: [] } });
+    });
+
+    renderHook(() => useTracePolling());
+    window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(taskStateCount()).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('useTracePolling - hidden-tab pacing', () => {
+  const setHidden = (hidden: boolean) => {
+    Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  afterEach(() => {
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+  });
+
+  it('drops to a slow heartbeat while hidden and resumes immediately on return', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === `/executions/${JOB}`) return Promise.resolve({ data: { status: 'running' } });
+      return Promise.resolve({ data: { traces: [] } });
+    });
+
+    renderHook(() => useTracePolling());
+    window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+    await vi.advanceTimersByTimeAsync(0);
+    const baseline = execProbeCount();
+    expect(baseline).toBe(1);
+
+    // Hide the tab: fast 2s ticks must stop; only the slow heartbeat remains.
+    setHidden(true);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(execProbeCount()).toBe(baseline); // no fast ticks while hidden
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(execProbeCount()).toBe(baseline + 1); // one slow heartbeat
+
+    // Back to visible: immediate poll + fast cadence restored.
+    setHidden(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(execProbeCount()).toBe(baseline + 2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(execProbeCount()).toBe(baseline + 3);
+  });
+});
+
+describe('useTracePolling - terminal events are gated on the active job', () => {
+  const runningResponse = (url: string) => {
+    if (url === `/executions/${JOB}`) return Promise.resolve({ data: { status: 'running' } });
+    return Promise.resolve({ data: { traces: [] } });
+  };
+
+  it.each(['jobCompleted', 'jobFailed', 'jobStopped'])(
+    'ignores %s for a DIFFERENT job (regression: backgrounded run completing froze the foreground poller)',
+    async (eventName) => {
+      apiGet.mockImplementation(runningResponse);
+
+      renderHook(() => useTracePolling());
+      window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+      await vi.advanceTimersByTimeAsync(0);
+      const before = execProbeCount();
+
+      // A different (backgrounded) run reaches a terminal state.
+      window.dispatchEvent(new CustomEvent(eventName, { detail: { jobId: 'an-older-run' } }));
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // The foreground job's poller must keep going.
+      expect(execProbeCount()).toBeGreaterThan(before);
+    },
+  );
+
+  it.each(['jobCompleted', 'jobFailed', 'jobStopped'])(
+    'stops on %s for the ACTIVE job',
+    async (eventName) => {
+      apiGet.mockImplementation(runningResponse);
+
+      renderHook(() => useTracePolling());
+      window.dispatchEvent(new CustomEvent('jobCreated', { detail: { jobId: JOB } }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2000);
+      const before = execProbeCount();
+      expect(before).toBeGreaterThanOrEqual(2);
+
+      window.dispatchEvent(new CustomEvent(eventName, { detail: { jobId: JOB } }));
+      await vi.advanceTimersByTimeAsync(6000);
+
+      expect(execProbeCount()).toBe(before); // polling stopped
+    },
+  );
 });

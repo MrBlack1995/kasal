@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { dispatch } from '../api/dispatcher';
 import { useExecutionStore } from '../store/executionStore';
 import {
@@ -236,6 +236,16 @@ export function useDispatcher(options: UseDispatcherOptions) {
   const isDispatchingRef = useRef(false);
   // Store last generated crew for "ec"/"execute crew" command
   const lastGeneratedRef = useRef<GenerationCompleteData | null>(null);
+  // Hold options in a ref (updated each render) so sendMessage can be a STABLE
+  // callback. ChatWorkspace passes a fresh options literal every render, and a
+  // sendMessage that depended on it churned the whole dispatcher object — which
+  // churned ChatWorkspace's handleSend → ChatContainer's handleCommand, making
+  // the memoized ChatMessage bubbles re-render on every tick anyway. Mirrors
+  // the optionsRef pattern in useExecutionStream.
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
   const sendMessage = useCallback(
     async (
@@ -247,6 +257,7 @@ export function useDispatcher(options: UseDispatcherOptions) {
       displayAs?: string,
       knowledgeFilePaths?: string[],
     ) => {
+      const options = optionsRef.current;
       if (isDispatchingRef.current) return;
       isDispatchingRef.current = true;
 
@@ -337,9 +348,10 @@ export function useDispatcher(options: UseDispatcherOptions) {
         const content = getAssistantResponse(result);
         const resultType = getResultType(result);
 
+        // Keys only — pretty-printing the ENTIRE generation_result (multi-100KB
+        // A2UI payloads) just to slice a log sample was a per-dispatch CPU tax.
         console.log('[dispatcher] intent:', result.dispatcher.intent, 'resultType:', resultType,
-          'generation_result keys:', result.generation_result ? Object.keys(result.generation_result as Record<string, unknown>) : 'null',
-          'generation_result sample:', JSON.stringify(result.generation_result, null, 2)?.slice(0, 800));
+          'generation_result keys:', result.generation_result ? Object.keys(result.generation_result as Record<string, unknown>) : 'null');
 
         // For non-streaming crew results, convert to GenerationCompleteData format
         let resultData = result.generation_result;
@@ -442,12 +454,17 @@ export function useDispatcher(options: UseDispatcherOptions) {
         isDispatchingRef.current = false;
       }
     },
-    [options]
+    []
   );
 
   const setLastGenerated = useCallback((data: GenerationCompleteData) => {
     lastGeneratedRef.current = data;
   }, []);
 
-  return { sendMessage, isDispatching: isDispatchingRef, setLastGenerated };
+  // Stable object identity (all members are stable): keeps ChatWorkspace's
+  // handleSend — which depends on the whole dispatcher — from churning per render.
+  return useMemo(
+    () => ({ sendMessage, isDispatching: isDispatchingRef, setLastGenerated }),
+    [sendMessage, setLastGenerated],
+  );
 }

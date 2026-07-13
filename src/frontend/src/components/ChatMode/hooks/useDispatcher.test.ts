@@ -49,13 +49,14 @@ function result(
 
 // ChatMode run settings the hook passes to dispatch() as the 4th arg. Defaults:
 // session-1 (getCurrentSessionId), and the execution store's own defaults
-// (workspace-wide memory recall, memory on, no MCP servers). The 5th arg is the
-// CLEAN user message (before the intent-steering prefix is added to dispatch).
+// (workspace-wide memory recall, memory OFF by default since the "default to
+// Session memory" change — disable_memory: true, no MCP servers). The 5th arg
+// is the CLEAN user message (before the intent-steering prefix is added).
 const RUN_SETTINGS = {
   auto_execute: true,
   session_id: 'session-1',
   memory_workspace_scope: true,
-  disable_memory: false,
+  disable_memory: true,
   mcp_servers: [],
   agentbricks_endpoints: [],
   // Default answer mode is 'chat' (single light agent) — also skips the
@@ -987,4 +988,41 @@ describe('useDispatcher', () => {
       });
     });
   });
+
+  describe('referential stability (perf W3.7)', () => {
+    it('keeps a STABLE dispatcher identity + sendMessage across re-renders with fresh options', () => {
+      // ChatWorkspace passes a NEW options literal every render; the returned
+      // dispatcher (and sendMessage) must not churn, or ChatWorkspace.handleSend
+      // → ChatContainer.handleCommand churn and the memoized ChatMessage bubbles
+      // re-render on every tick.
+      const { result: hook, rerender } = renderHook(() => useDispatcher(makeOptions()));
+      const first = hook.current;
+      const firstSend = hook.current.sendMessage;
+
+      rerender();
+      rerender();
+
+      expect(hook.current).toBe(first);
+      expect(hook.current.sendMessage).toBe(firstSend);
+    });
+
+    it('sendMessage still sees the LATEST options after a re-render', async () => {
+      const firstEnsure = vi.fn(async () => 'session-A');
+      const secondEnsure = vi.fn(async () => 'session-B');
+      const { result: hook, rerender } = renderHook(
+        ({ ensure }) => useDispatcher(makeOptions({ ensureSession: ensure })),
+        { initialProps: { ensure: firstEnsure } },
+      );
+
+      rerender({ ensure: secondEnsure });
+      await act(async () => {
+        await hook.current.sendMessage('hi');
+      });
+
+      // The stable callback reads options from a ref → uses the newest ensureSession.
+      expect(secondEnsure).toHaveBeenCalled();
+      expect(firstEnsure).not.toHaveBeenCalled();
+    });
+  });
+
 });

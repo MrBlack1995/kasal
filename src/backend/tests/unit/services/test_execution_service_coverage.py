@@ -414,7 +414,7 @@ class TestGetExecutionStatus:
         session = AsyncMock()
         svc = make_service(session=session)
         mock_repo = AsyncMock()
-        mock_repo.get_execution_by_job_id = AsyncMock(return_value=None)
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=None)
         mock_repo_cls = MagicMock(return_value=mock_repo)
         with patch.dict("sys.modules", {
             "src.repositories.execution_history_repository": MagicMock(
@@ -435,11 +435,15 @@ class TestGetExecutionStatus:
             result={"output": "done"},
             run_name="run-1",
             error=None,
+            execution_type="crew",
             mlflow_trace_id="trace-1",
             mlflow_experiment_name="exp-1",
             mlflow_evaluation_run_id="eval-1",
         )
         mock_repo = AsyncMock()
+        # Slim probe answers the scalars; the terminal status triggers the
+        # full-row fetch that supplies the result blob.
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=fake_exec)
         mock_repo.get_execution_by_job_id = AsyncMock(return_value=fake_exec)
         mock_repo_cls = MagicMock(return_value=mock_repo)
         with patch.dict("sys.modules", {
@@ -451,6 +455,39 @@ class TestGetExecutionStatus:
         assert result["execution_id"] == "exec-1"
         assert result["status"] == "COMPLETED"
         assert result["mlflow_trace_id"] == "trace-1"
+        assert result["result"] == {"output": "done"}
+
+    @pytest.mark.asyncio
+    async def test_in_flight_status_skips_the_result_blob_fetch(self):
+        """Perf regression (W2.2): a RUNNING poll must answer from the slim
+        scalar probe alone — never load the full row (result/inputs JSON)."""
+        session = AsyncMock()
+        svc = make_service(session=session)
+        fake_summary = SimpleNamespace(
+            status="RUNNING",
+            created_at=datetime(2024, 1, 1),
+            completed_at=None,
+            run_name="run-1",
+            error=None,
+            execution_type="agent",
+            mlflow_trace_id=None,
+            mlflow_experiment_name=None,
+            mlflow_evaluation_run_id=None,
+        )
+        mock_repo = AsyncMock()
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=fake_summary)
+        mock_repo.get_execution_by_job_id = AsyncMock()
+        mock_repo_cls = MagicMock(return_value=mock_repo)
+        with patch.dict("sys.modules", {
+            "src.repositories.execution_history_repository": MagicMock(
+                ExecutionHistoryRepository=mock_repo_cls
+            )
+        }):
+            result = await svc.get_execution_status("exec-1")
+        assert result["status"] == "RUNNING"
+        assert result["result"] is None
+        assert result["run_name"] == "run-1"
+        mock_repo.get_execution_by_job_id.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_none_on_exception(self):
@@ -481,7 +518,7 @@ class TestGetExecutionStatus:
             "group_email": "u@e.com",
         }
         mock_repo = AsyncMock()
-        mock_repo.get_execution_by_job_id = AsyncMock(return_value=None)
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=None)
         mock_repo_cls = MagicMock(return_value=mock_repo)
         try:
             with patch.dict("sys.modules", {
@@ -513,7 +550,7 @@ class TestGetExecutionStatus:
             "group_email": "x@y.com",
         }
         mock_repo = AsyncMock()
-        mock_repo.get_execution_by_job_id = AsyncMock(return_value=None)
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=None)
         mock_repo_cls = MagicMock(return_value=mock_repo)
         try:
             with patch.dict("sys.modules", {
@@ -533,7 +570,7 @@ class TestGetExecutionStatus:
         svc = make_service(session=session)
         ExecutionService.executions.clear()
         mock_repo = AsyncMock()
-        mock_repo.get_execution_by_job_id = AsyncMock(return_value=None)
+        mock_repo.get_execution_summary_by_job_id = AsyncMock(return_value=None)
         mock_repo_cls = MagicMock(return_value=mock_repo)
         with patch.dict("sys.modules", {
             "src.repositories.execution_history_repository": MagicMock(
@@ -954,6 +991,13 @@ class TestStopExecution:
 class TestCreateExecution:
     """Tests for create_execution - the large orchestration method."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_deferred_rename(self):
+        """The LLM rename is fire-and-forget (perf: off the critical path);
+        stub it so unit tests never schedule real template/LLM work."""
+        with patch.object(ExecutionService, "_generate_run_name_async", new=AsyncMock()) as m:
+            yield m
+
     def _make_cfg(self, execution_type="crew", **kw):
         """Build a minimal CrewConfig-like object for create_execution."""
         cfg = MagicMock()
@@ -988,7 +1032,9 @@ class TestCreateExecution:
 
         assert result["execution_id"] is not None
         assert result["status"] == ExecutionStatus.RUNNING.value
-        assert result["run_name"] == "Test Run"
+        # run_name is the instant placeholder (first task description words);
+        # the LLM name arrives later via the deferred rename task.
+        assert result["run_name"] == "task"
         background_tasks.add_task.assert_called_once()
         ExecutionService.executions.clear()
 
@@ -1057,7 +1103,7 @@ class TestCreateExecution:
             with patch("asyncio.create_task", return_value=MagicMock()):
                 result = await svc.create_execution(cfg, background_tasks=None)
 
-        assert result["run_name"] == "Flow Logger Test"
+        assert result["run_name"] == "task"  # placeholder; LLM rename is deferred
         ExecutionService.executions.clear()
 
     @pytest.mark.asyncio
@@ -1215,7 +1261,117 @@ class TestCheckForRunningJobs:
 # create_execution - additional branches
 # ---------------------------------------------------------------------------
 
+class TestDeferredRunNameGeneration:
+    """Perf regression (W1.2): the naming LLM call must be OFF the critical
+    path — create_execution starts the run under an instant placeholder and a
+    fire-and-forget task renames it when the LLM returns."""
+
+    def _make_cfg(self, **kw):
+        cfg = MagicMock()
+        cfg.execution_type = "crew"
+        cfg.model = kw.get("model", "gpt-4")
+        cfg.agents_yaml = kw.get("agents_yaml", {"a1": {"role": "researcher"}})
+        cfg.tasks_yaml = kw.get("tasks_yaml", {"t1": {"description": "task"}})
+        cfg.inputs = {}
+        cfg.planning = False
+        cfg.reasoning = False
+        cfg.schema_detection_enabled = False
+        cfg.flow_id = None
+        cfg.nodes = None
+        cfg.edges = None
+        cfg.flow_config = None
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_create_execution_never_awaits_the_naming_llm(self):
+        svc = make_service()
+        cfg = self._make_cfg(tasks_yaml={"t1": {"name": "Analyze quarterly sales data"}})
+        svc.execution_name_service.generate_execution_name = AsyncMock()
+
+        background_tasks = MagicMock()
+        background_tasks.add_task = MagicMock()
+
+        with patch("src.services.execution_status_service.ExecutionStatusService.create_execution",
+                   new=AsyncMock(return_value=True)), \
+             patch.object(ExecutionService, "_generate_run_name_async", new=AsyncMock()) as rename:
+            result = await svc.create_execution(cfg, background_tasks=background_tasks)
+
+        # The inline LLM naming roundtrip (1-10+s on reasoning models) is gone...
+        svc.execution_name_service.generate_execution_name.assert_not_awaited()
+        # ...the run starts under the deterministic placeholder...
+        assert result["run_name"] == "Analyze quarterly sales data"
+        # ...and the rename was scheduled off the critical path.
+        rename.assert_called_once()
+        ExecutionService.executions.clear()
+
+    def test_placeholder_prefers_first_task_name(self):
+        name = ExecutionService._derive_placeholder_run_name(
+            {"a1": {"role": "Researcher"}},
+            {"t1": {"name": "Summarize customer feedback themes for Q3"}},
+        )
+        assert name == "Summarize customer feedback themes"  # first 4 words
+
+    def test_placeholder_uses_task_description_when_no_name(self):
+        name = ExecutionService._derive_placeholder_run_name(
+            {}, {"t1": {"description": "Research the latest AI news today"}}
+        )
+        assert name == "Research the latest AI"
+
+    def test_placeholder_falls_back_to_agent_role(self):
+        name = ExecutionService._derive_placeholder_run_name(
+            {"a1": {"role": "Data Analyst"}}, {}
+        )
+        assert name == "Data Analyst Run"
+
+    def test_placeholder_timestamp_fallback_when_empty(self):
+        name = ExecutionService._derive_placeholder_run_name({}, {})
+        assert name.startswith("Execution-")
+
+    @pytest.mark.asyncio
+    async def test_deferred_rename_applies_llm_name_to_db_and_memory(self):
+        ExecutionService.executions["job-rn"] = {"run_name": "placeholder", "status": "RUNNING"}
+        mock_name_service = MagicMock()
+        mock_name_service.generate_execution_name = AsyncMock(
+            return_value=SimpleNamespace(name="Sales Analysis Crew")
+        )
+
+        with patch("src.services.execution_service.ExecutionNameService") as name_cls, \
+             patch("src.services.execution_status_service.ExecutionStatusService.update_run_name",
+                   new=AsyncMock(return_value=True)) as update_name:
+            name_cls.create.return_value = mock_name_service
+            await ExecutionService._generate_run_name_async(
+                execution_id="job-rn",
+                agents_yaml={"a1": {"role": "analyst"}},
+                tasks_yaml={"t1": {"description": "analyze"}},
+                model="gpt-4",
+            )
+
+        update_name.assert_awaited_once_with("job-rn", "Sales Analysis Crew")
+        assert ExecutionService.executions["job-rn"]["run_name"] == "Sales Analysis Crew"
+        ExecutionService.executions.clear()
+
+    @pytest.mark.asyncio
+    async def test_deferred_rename_failure_is_swallowed_and_keeps_placeholder(self):
+        ExecutionService.executions["job-fail"] = {"run_name": "placeholder"}
+
+        with patch("src.services.execution_service.ExecutionNameService") as name_cls:
+            name_cls.create.side_effect = RuntimeError("LLM unavailable")
+            # Must not raise — the placeholder simply remains.
+            await ExecutionService._generate_run_name_async(
+                execution_id="job-fail", agents_yaml={}, tasks_yaml={}, model="gpt-4"
+            )
+
+        assert ExecutionService.executions["job-fail"]["run_name"] == "placeholder"
+        ExecutionService.executions.clear()
+
+
 class TestCreateExecutionBranches:
+
+    @pytest.fixture(autouse=True)
+    def _stub_deferred_rename(self):
+        """Stub the fire-and-forget LLM rename (see TestCreateExecution)."""
+        with patch.object(ExecutionService, "_generate_run_name_async", new=AsyncMock()) as m:
+            yield m
     def _make_cfg(self, execution_type="crew", **kw):
         cfg = MagicMock()
         cfg.execution_type = execution_type

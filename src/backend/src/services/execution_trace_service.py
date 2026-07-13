@@ -142,20 +142,24 @@ class ExecutionTraceService:
     
     async def get_traces_by_job_id(
         self,
-        group_context=None, 
+        group_context=None,
         job_id: str = None,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
+        since_id: int = 0
     ) -> ExecutionTraceResponseByJobId:
         """
         Get traces for an execution by job_id with pagination and authorization.
-        
+
         Args:
             group_context: Group context for authorization (contains group_ids and email)
             job_id: String ID of the execution (job_id in database)
             limit: Maximum number of traces to return
             offset: Number of traces to skip
-            
+            since_id: Incremental cursor — only traces with id greater than this.
+                Pollers pass their last seen id so each poll returns only NEW
+                rows instead of re-reading (and re-masking) the whole trace set.
+
         Returns:
             ExecutionTraceResponseByJobId with traces for the execution if authorized
         """
@@ -164,10 +168,13 @@ class ExecutionTraceService:
 
             # Get group IDs from context for filtering
             group_ids = group_context.group_ids if group_context else None
-            logger.info(f"[get_traces_by_job_id] job_id={job_id}, group_context.group_ids={group_ids}")
+            # DEBUG: this runs per poll tick during live runs — INFO was log spam.
+            logger.debug(f"[get_traces_by_job_id] job_id={job_id}, group_context.group_ids={group_ids}")
 
-            # Check if the execution exists and the user has access to it
-            execution = await self.execution_history_repository.get_execution_by_job_id(
+            # Authorize with the SLIM summary lookup — the full-row variant
+            # dragged the result/inputs JSON blobs through the driver on every
+            # 2s poll just to check group access and resolve run_id.
+            execution = await self.execution_history_repository.get_execution_summary_by_job_id(
                 job_id,
                 group_ids=group_ids
             )
@@ -175,7 +182,7 @@ class ExecutionTraceService:
             if not execution:
                 # Either doesn't exist or user doesn't have access
                 # Try to get execution without group filter to diagnose
-                execution_no_filter = await self.execution_history_repository.get_execution_by_job_id(job_id, group_ids=None)
+                execution_no_filter = await self.execution_history_repository.get_execution_summary_by_job_id(job_id, group_ids=None)
                 if execution_no_filter:
                     logger.warning(f"[get_traces_by_job_id] Access denied: execution {job_id} has group_id={execution_no_filter.group_id}, but user group_ids={group_ids}")
                 else:
@@ -189,11 +196,15 @@ class ExecutionTraceService:
             traces = await self.repository.get_by_job_id(
                 job_id,
                 limit,
-                offset
+                offset,
+                since_id
             )
-            
-            # If no traces found using the direct job_id field, try via the run_id (for backward compatibility)
-            if not traces:
+
+            # If no traces found using the direct job_id field, try via the run_id
+            # (for backward compatibility). Full reads only: with a cursor,
+            # "no new traces" is the NORMAL result of most polls — falling back
+            # would add a pointless second query per empty tick.
+            if not traces and not since_id:
                 logger.debug(f"No traces found directly with job_id {job_id}, trying via run_id lookup")
                 traces = await self.repository.get_by_run_id(
                     run_id,
@@ -221,6 +232,46 @@ class ExecutionTraceService:
             logger.error(f"Error retrieving traces for execution with job_id {job_id}: {str(e)}")
             raise
     
+    async def get_state_events_by_job_id(
+        self,
+        group_context=None,
+        job_id: str = None,
+        event_types: List[str] = None,
+    ) -> Optional[List[ExecutionTraceItem]]:
+        """Authorized fetch of ONLY the state-transition events for a job.
+
+        Backs the crew-node-states / task-states endpoints: they reduce a few
+        lifecycle events (task_started/completed/failed, crew_completed) into a
+        small state dict, and previously fetched + validated + masked the run's
+        ENTIRE trace set (up to 15k rows with payload blobs) per poll to do it.
+
+        Returns None when the execution doesn't exist or the caller lacks
+        access; an empty list when authorized but no matching events yet.
+        """
+        try:
+            group_ids = group_context.group_ids if group_context else None
+
+            execution = await self.execution_history_repository.get_execution_summary_by_job_id(
+                job_id, group_ids=group_ids
+            )
+            if not execution:
+                logger.warning(f"[get_state_events_by_job_id] Execution {job_id} not found or access denied")
+                return None
+
+            traces = await self.repository.get_state_events_by_job_id(
+                job_id, event_types or []
+            )
+            return [
+                _mask_trace_sensitive_data(ExecutionTraceItem.model_validate(trace))
+                for trace in traces
+            ]
+        except SQLAlchemyError as e:
+            logger.error(f"Database error retrieving state events for job_id {job_id}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error retrieving state events for job_id {job_id}: {str(e)}")
+            raise
+
     async def get_all_traces(self,
         limit: int = 100,
         offset: int = 0
@@ -280,29 +331,14 @@ class ExecutionTraceService:
             if not group_context or not group_context.group_ids:
                 return ExecutionTraceList(traces=[], total=0, limit=limit, offset=offset)
             
-            # Get all executions for the group first
-            executions = await self.execution_history_repository.get_all_executions_for_groups(
-                group_ids=group_context.group_ids
+            # Single group-scoped page (group_id is denormalized + indexed on
+            # execution_trace). The previous implementation walked EVERY
+            # execution in the group with one query per job (N+1), materialized
+            # up to 100×N rows to slice one page in Python, and reported a
+            # wrong total (capped at 100 per job).
+            traces, total_count = await self.repository.get_by_group_ids(
+                group_context.group_ids, limit=limit, offset=offset
             )
-            
-            if not executions:
-                return ExecutionTraceList(traces=[], total=0, limit=limit, offset=offset)
-            
-            # Get job_ids from executions
-            job_ids = [exec.job_id for exec in executions if exec.job_id]
-            
-            if not job_ids:
-                return ExecutionTraceList(traces=[], total=0, limit=limit, offset=offset)
-            
-            # Get traces for these job_ids
-            traces = []
-            for job_id in job_ids:
-                job_traces = await self.repository.get_by_job_id(job_id, limit=100, offset=0)
-                traces.extend(job_traces)
-            
-            # Apply pagination
-            total_count = len(traces)
-            traces = traces[offset:offset + limit]
 
             # Convert to schema objects and mask sensitive data
             trace_items = [_mask_trace_sensitive_data(ExecutionTraceItem.model_validate(trace)) for trace in traces]
@@ -386,12 +422,20 @@ class ExecutionTraceService:
             logger.error(f"Error retrieving trace {trace_id}: {str(e)}")
             raise
     
-    async def create_trace(self, trace_data: Dict[str, Any]) -> ExecutionTraceItem:
+    async def create_trace(
+        self,
+        trace_data: Dict[str, Any],
+        verify_execution_exists: bool = True,
+    ) -> ExecutionTraceItem:
         """
         Create a new trace.
 
         Args:
             trace_data: Dictionary with trace data
+            verify_execution_exists: Whether to check the parent ExecutionHistory
+                row exists before inserting. Batch writers (e.g. the light-agent
+                per-run persister) verify once for the first event of a run and
+                skip the extra SELECT for the rest.
 
         Returns:
             Created ExecutionTraceItem
@@ -402,12 +446,15 @@ class ExecutionTraceService:
         try:
             job_id = trace_data.get('job_id')
             event_type = trace_data.get('event_type', 'unknown')
-            logger.info(f"[ExecutionTraceService] Creating trace for job_id={job_id}, event_type={event_type}")
+            # DEBUG: this runs per tool/LLM event during runs — INFO was log spam.
+            logger.debug(f"[ExecutionTraceService] Creating trace for job_id={job_id}, event_type={event_type}")
 
-            trace = await self.repository.create(trace_data)
+            trace = await self.repository.create(
+                trace_data, verify_execution_exists=verify_execution_exists
+            )
 
             trace_item = ExecutionTraceItem.model_validate(trace)
-            logger.info(f"[ExecutionTraceService] Trace created successfully: id={trace.id}, job_id={job_id}")
+            logger.debug(f"[ExecutionTraceService] Trace created successfully: id={trace.id}, job_id={job_id}")
 
             # Broadcast SSE event for real-time trace updates
             # CRITICAL: Skip SSE broadcast in subprocess mode because:
@@ -420,17 +467,13 @@ class ExecutionTraceService:
                 logger.debug(f"[ExecutionTraceService] Skipping SSE broadcast in subprocess mode for job_id={job_id}")
             elif job_id:
                 try:
-                    # Check SSE connection statistics before broadcast
-                    stats = sse_manager.get_statistics()
-                    logger.info(f"[ExecutionTraceService] SSE stats before broadcast: connections={stats['total_connections']}, active_jobs={stats['active_jobs']}")
-
                     event = SSEEvent(
                         data=trace_item.model_dump(),
                         event="trace",
                         id=f"{job_id}_trace_{trace.id}"
                     )
                     sent_count = await sse_manager.broadcast_to_job(job_id, event)
-                    logger.info(f"[ExecutionTraceService] Broadcasted SSE trace event for job_id={job_id}, sent to {sent_count} clients")
+                    logger.debug(f"[ExecutionTraceService] Broadcasted SSE trace event for job_id={job_id}, sent to {sent_count} clients")
                 except Exception as sse_error:
                     # Don't fail trace creation if SSE fails
                     logger.warning(f"[ExecutionTraceService] Failed to broadcast SSE trace event: {sse_error}")

@@ -302,6 +302,68 @@ class ExecutionService:
             "group_email": group_email
         }
 
+    @staticmethod
+    def _derive_placeholder_run_name(agents_yaml: Dict[str, Any], tasks_yaml: Dict[str, Any]) -> str:
+        """Instant, deterministic run name used until the LLM rename lands.
+
+        Prefers the first task's name/description, then the first agent role,
+        then a timestamped fallback — no model call, no DB roundtrip.
+        """
+        for cfg in (tasks_yaml or {}).values():
+            if not isinstance(cfg, dict):
+                continue
+            candidate = str(cfg.get("name") or cfg.get("description") or "").strip()
+            if candidate:
+                return " ".join(candidate.split()[:4])
+        for cfg in (agents_yaml or {}).values():
+            if not isinstance(cfg, dict):
+                continue
+            candidate = str(cfg.get("role") or cfg.get("name") or "").strip()
+            if candidate:
+                return " ".join(candidate.split()[:4]) + " Run"
+        return f"Execution-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    @staticmethod
+    async def _generate_run_name_async(
+        execution_id: str,
+        agents_yaml: Dict[str, Any],
+        tasks_yaml: Dict[str, Any],
+        model: str,
+    ) -> None:
+        """Generate the descriptive run name OFF the critical path and apply it.
+
+        The naming completion used to be awaited inline in create_execution,
+        adding a full LLM roundtrip (1-10+s on reasoning models) before every
+        run could start. The run starts under a placeholder instead; this task
+        renames it in the DB and the in-memory registry when the LLM returns.
+        Failures are non-fatal — the placeholder simply remains.
+        """
+        try:
+            name_service = ExecutionNameService.create(None)
+            request = ExecutionNameGenerationRequest(
+                agents_yaml=agents_yaml,
+                tasks_yaml=tasks_yaml,
+                model=model
+            )
+            response = await name_service.generate_execution_name(request)
+            new_name = (response.name or "").strip()
+            if not new_name:
+                return
+
+            from src.services.execution_status_service import ExecutionStatusService
+            await ExecutionStatusService.update_run_name(execution_id, new_name)
+
+            # Keep the in-memory fallback (used when the DB row is missing)
+            # consistent with the renamed record.
+            mem_entry = ExecutionService.executions.get(execution_id)
+            if mem_entry is not None:
+                mem_entry["run_name"] = new_name
+        except Exception as e:
+            crew_logger.warning(
+                f"[ExecutionService] Deferred run-name generation failed for {execution_id} "
+                f"(placeholder name kept): {e}"
+            )
+
     @classmethod
     def clear_in_memory_cache(cls) -> int:
         """Drop the in-memory execution registry. Invoked when the underlying DB
@@ -740,12 +802,18 @@ class ExecutionService:
             # Create repository with session if available
             if self.session:
                 repository = ExecutionHistoryRepository(self.session)
-                execution = await repository.get_execution_by_job_id(execution_id, group_ids=group_ids)
+                # Slim scalar-only probe first: the vast majority of poll ticks
+                # observe an in-flight run, where nobody needs the result blob —
+                # the full row (result/inputs JSON) is fetched only once the
+                # status is terminal.
+                execution = await repository.get_execution_summary_by_job_id(
+                    execution_id, group_ids=group_ids
+                )
             else:
                 # Log error if no session available
                 exec_logger.error(f"No database session available for getting execution status")
                 return None
-            
+
             if not execution:
                 # DB miss — before declaring a 404, fall back to the in-memory
                 # registry. A just-created run can be polled before its row is
@@ -769,21 +837,39 @@ class ExecutionService:
                         "result": None,
                         "run_name": in_memory.get("run_name"),
                         "error": None,
+                        "execution_type": None,
                         "mlflow_trace_id": None,
                         "mlflow_experiment_name": None,
                         "mlflow_evaluation_run_id": None,
                     }
                 exec_logger.warning(f"Execution {execution_id} not found in database.")
                 return None
-            
+
+            # Only terminal statuses carry a result the caller can use; fetch
+            # the full row (with the JSON blobs) just for those. In-flight
+            # statuses answer straight from the slim probe with result=None —
+            # the same value they returned before, without dragging a completed
+            # prior payload through the driver on every 2s poll.
+            in_flight = {"PENDING", "PREPARING", "RUNNING", "WAITING_FOR_APPROVAL", "STOPPING"}
+            result_value = None
+            if (execution.status or "").upper() not in in_flight:
+                full_row = await repository.get_execution_by_job_id(
+                    execution_id, group_ids=group_ids
+                )
+                if full_row is not None:
+                    result_value = full_row.result
+
             return {
                 "execution_id": execution_id,
                 "status": execution.status,
                 "created_at": execution.created_at,
                 "completed_at": execution.completed_at,
-                "result": execution.result,
+                "result": result_value,
                 "run_name": execution.run_name,
                 "error": execution.error,
+                # Lets the trace poller skip requests that don't apply to this
+                # run type (e.g. task-states for light/agent chat runs).
+                "execution_type": execution.execution_type,
                 # MLflow integration fields
                 "mlflow_trace_id": execution.mlflow_trace_id,
                 "mlflow_experiment_name": execution.mlflow_experiment_name,
@@ -930,14 +1016,13 @@ class ExecutionService:
                     UserContext.set_user_token(group_context.access_token)
                     logger.info("[ExecutionService.create_execution] Set user_token for OBO authentication")
 
-            request = ExecutionNameGenerationRequest(
-                agents_yaml=agents_yaml,
-                tasks_yaml=tasks_yaml,
-                model=model
-            )
-            response = await self.execution_name_service.generate_execution_name(request)
-            run_name = response.name
-            logger.debug(f"[ExecutionService.create_execution] Generated run_name: {run_name} for execution_id: {execution_id}")
+            # Start with an instant deterministic placeholder name. The LLM
+            # naming call (a full model roundtrip — seconds on reasoning models)
+            # used to be awaited here, delaying time-to-first-answer of EVERY
+            # run; it now happens off the critical path (see the rename task
+            # scheduled after the DB record exists) and simply renames the run.
+            run_name = ExecutionService._derive_placeholder_run_name(agents_yaml, tasks_yaml)
+            logger.debug(f"[ExecutionService.create_execution] Placeholder run_name: {run_name} for execution_id: {execution_id}")
 
             # Add run_name to config inputs for crew consistency
             if not config.inputs:
@@ -1091,6 +1176,16 @@ class ExecutionService:
                 group_email=group_context.group_email if group_context else None,
             )
             logger.debug(f"[ExecutionService.create_execution] Added execution_id: {execution_id} to in-memory store with status RUNNING")
+
+            # Fire-and-forget the LLM rename now that the record exists. The
+            # created asyncio task inherits this request's contextvars, so the
+            # group context / OBO token set above still applies inside it.
+            asyncio.create_task(ExecutionService._generate_run_name_async(
+                execution_id=execution_id,
+                agents_yaml=agents_yaml,
+                tasks_yaml=tasks_yaml,
+                model=model,
+            ))
 
             # Start execution in background
             logger.info(f"[ExecutionService.create_execution] Preparing to launch background task for execution_id: {execution_id}...")

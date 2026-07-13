@@ -486,21 +486,41 @@ class TestProcessTablePass2:
 
 class TestProcessTableCascade:
     def test_cascade_reclassifies_divide_over_artifacts(self):
-        """Step 5c: DIVIDE sub-expression referencing artifact measures → reclassified."""
+        """Step 5c: DIVIDE sub-expression referencing artifact measures → reclassified.
+
+        Uses a GENUINE display-only artifact (FORMAT of a literal — not
+        translatable by the deterministic FORMAT converter, which only handles a
+        real column/aggregate inner) so the cascade-reclassification path is
+        still exercised. FORMAT-wrapping-an-aggregate is now translated
+        deterministically and is deliberately no longer an artifact.
+        """
+        ti = _make_table_info()
+        ctx = _make_context()
+        dax = [
+            {'measure_name': 'label', 'original_name': 'Label',
+             'dax_expression': 'FORMAT(TODAY(), "YYYY-MM-DD")'},
+            {'measure_name': 'ratio', 'original_name': 'Ratio',
+             'dax_expression': 'DIVIDE([Label], SUM(T[Y]))'},
+        ]
+        spec = _run_process_table('fact_test', ti, dax, ctx)
+        all_skip_reasons = [m.skip_reason for m in spec.untranslatable]
+        # The display-only FORMAT (and the DIVIDE referencing it) stay untranslatable.
+        assert len(spec.untranslatable) >= 1
+        assert any(r for r in all_skip_reasons)
+
+    def test_format_wrapping_aggregate_now_translates(self):
+        """Regression: FORMAT wrapping a real aggregate is now translated
+        deterministically (field-eng parity) instead of being an artifact."""
         ti = _make_table_info()
         ctx = _make_context()
         dax = [
             {'measure_name': 'fmt_measure', 'original_name': 'Fmt Measure',
              'dax_expression': 'FORMAT(SUM(T[X]), "#,##0")'},
-            {'measure_name': 'ratio', 'original_name': 'Ratio',
-             'dax_expression': 'DIVIDE([Fmt Measure], SUM(T[Y]))'},
         ]
         spec = _run_process_table('fact_test', ti, dax, ctx)
-        # Either reclassified to PY/DIVIDE artifacts or DIVIDE sub-expression remains
-        all_skip_reasons = [m.skip_reason for m in spec.untranslatable]
-        # Both measures should be untranslatable (FORMAT and DIVIDE referencing it)
-        assert len(spec.untranslatable) >= 1
-        assert any(r for r in all_skip_reasons)
+        fmt = next((m for m in spec.measures if m.original_name == 'Fmt Measure'), None)
+        assert fmt is not None and fmt.is_translatable
+        assert 'format_number' in (fmt.sql_expr or '')
 
 
 # ─── process_table — source SQL enrichment ────────────────────────────────────
@@ -1464,3 +1484,61 @@ class TestIsRealSwitchDecomp:
     def test_non_dict_is_not_real(self):
         assert _is_real_switch_decomp('not-a-dict') is False
         assert _is_real_switch_decomp(None) is False
+
+
+class TestReferencedByPopulation:
+    """process_table populates TranslationResult.referenced_by from config
+    ['measure_usage'] (global) with a local-graph fallback when absent."""
+
+    def test_from_config_measure_usage(self):
+        ti = _make_table_info()
+        ctx = _make_context(config={'measure_usage': {'Total': 5}})
+        dax = [{'measure_name': 'total', 'dax_expression': 'SUM(Sales[amount])',
+                'original_name': 'Total'}]
+        spec = _run_process_table('fact_test', ti, dax, ctx)
+        by_name = {m.original_name: m for m in spec.measures}
+        assert 'Total' in by_name
+        assert by_name['Total'].referenced_by == 5
+
+    def test_local_fallback_when_config_absent(self):
+        # No measure_usage in config → local graph over this table's measures.
+        # 'Base' is referenced by 'Derived' → Base.referenced_by == 1.
+        ti = _make_table_info()
+        ctx = _make_context(config={})
+        dax = [
+            {'measure_name': 'base', 'dax_expression': 'SUM(Sales[amount])',
+             'original_name': 'Base'},
+            {'measure_name': 'derived', 'dax_expression': '[Base] * 2',
+             'original_name': 'Derived'},
+        ]
+        spec = _run_process_table('fact_test', ti, dax, ctx)
+        by_name = {m.original_name: m for m in (spec.measures + spec.untranslatable)}
+        assert by_name['Base'].referenced_by == 1
+
+
+class TestPromotedConverterEmitterSurvival:
+    """Regression guard for the alias risk: a promoted SUMX-filter measure must
+    survive process_table -> emit_yaml without being dropped by the emitter's
+    undeclared-alias gate, and its FILTER clause must normalize to source.<col>
+    (not a raw DAX table alias like sales.<col>)."""
+
+    def test_sumx_filter_survives_and_uses_source_alias(self):
+        # table_key matches the DAX table name (Sales) — mirrors a real run where
+        # mquery maps the DAX table to the fact source, so a FILTER over the
+        # fact's OWN column resolves to source.<col> (not a raw sales.<col> alias
+        # that the emitter's undeclared-alias gate would drop).
+        from src.engines.crewai.tools.custom.metric_view_utils.yaml_emitter import emit_yaml
+        ti = _make_table_info(
+            source_table='cat.sch.sales',
+            aggregate_columns=[{'name': 'amount', 'source_col': 'amount'}],
+            group_by_columns=['region'],
+        )
+        ti.table_name = 'Sales'
+        ctx = _make_context()
+        dax = [{'measure_name': 'eu_amt', 'original_name': 'EU Amt',
+                'dax_expression': 'SUMX(FILTER(Sales, Sales[region]="EU"), Sales[amount])'}]
+        spec = _run_process_table('Sales', ti, dax, ctx)
+        yaml = emit_yaml(spec)
+        # Survives emission (not dropped) and uses source. — no raw table alias.
+        assert 'eu_amt' in yaml
+        assert 'sales.' not in yaml.lower().replace('cat.sch.', '')

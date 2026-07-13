@@ -179,19 +179,40 @@ def cleanup_after_test():
     with ``TypeError: '>=' not supported between instances of 'int' and
     'MagicMock'``. Restoring handler lists keeps such leaks contained to the
     test that caused them.
+
+    Also restore CREW_SUBPROCESS_MODE: the process_crew/flow executor entry
+    points set ``os.environ["CREW_SUBPROCESS_MODE"] = "true"`` in-process
+    (intended for the spawned interpreter), so any test that exercises them
+    leaks the flag and silently flips subprocess-mode branches (e.g. the trace
+    repository's parent-existence check, SSE-broadcast gates) for every test
+    that runs after it.
     """
     import logging
+    import os
 
     saved = {logging.getLogger(): logging.getLogger().handlers[:]}
     for name in list(logging.root.manager.loggerDict):
         lg = logging.getLogger(name)
         if isinstance(lg, logging.Logger):
             saved[lg] = lg.handlers[:]
+    saved_subprocess_mode = os.environ.get("CREW_SUBPROCESS_MODE")
     try:
         yield
     finally:
         for lg, handlers in saved.items():
             lg.handlers[:] = handlers
+        if saved_subprocess_mode is None:
+            os.environ.pop("CREW_SUBPROCESS_MODE", None)
+        else:
+            os.environ["CREW_SUBPROCESS_MODE"] = saved_subprocess_mode
+        # The resolved-template cache is module-global; without clearing it a
+        # template one test resolved bleeds into the next test's expectations.
+        # (Sync fixture → clear the dict directly; no event loop is running.)
+        try:
+            from src.core.cache import template_cache
+            template_cache._cache.clear()
+        except Exception:
+            pass
 
 
 # Skip integration tests marker

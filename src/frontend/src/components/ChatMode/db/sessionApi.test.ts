@@ -137,6 +137,77 @@ describe('sessionApi - messages', () => {
     expect(messages[1].role).toBe('assistant');
   });
 
+  it('loads a short session with a single page request', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        messages: [{
+          id: 'm1', session_id: 's1', message_type: 'user',
+          content: 'hi', generation_result: null, timestamp: '2026-06-11T07:00:00',
+        }],
+      },
+    });
+
+    const messages = await api.getSessionMessages('s1');
+
+    expect(messages).toHaveLength(1);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith('/chat-history/sessions/s1/messages', {
+      params: { page: 0, per_page: 100 },
+    });
+  });
+
+  it('pages through sessions longer than 100 messages (regression: a single page-0 fetch dropped the newest turns)', async () => {
+    const wireMsg = (i: number) => ({
+      id: `m${i}`, session_id: 's1', message_type: 'user',
+      content: `msg ${i}`, generation_result: null,
+      timestamp: '2026-06-11T07:00:00',
+    });
+    const fullPage = Array.from({ length: 100 }, (_, i) => wireMsg(i));
+    const lastPage = [wireMsg(100), wireMsg(101)];
+    mockGet
+      .mockResolvedValueOnce({ data: { messages: fullPage } })
+      .mockResolvedValueOnce({ data: { messages: lastPage } });
+
+    const messages = await api.getSessionMessages('s1');
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet).toHaveBeenNthCalledWith(1, '/chat-history/sessions/s1/messages', {
+      params: { page: 0, per_page: 100 },
+    });
+    expect(mockGet).toHaveBeenNthCalledWith(2, '/chat-history/sessions/s1/messages', {
+      params: { page: 1, per_page: 100 },
+    });
+    expect(messages).toHaveLength(102);
+    // The newest turn (beyond page 0) survives the reload.
+    expect(messages[101].content).toBe('msg 101');
+  });
+
+  it('heals an envelope-clobbered a2ui card (surface-shaped resultData, no resultType)', async () => {
+    // Regression (HAR-confirmed): an old partial PUT replaced generation_result
+    // with {resultData} only, stripping resultType — the presentation then never
+    // rendered as a card again. A surface-shaped resultData must load as 'a2ui'.
+    const surface = { surfaceKind: 'presentation', components: [], theme: { accent: '#FF3621' } };
+    mockGet.mockResolvedValue({
+      data: {
+        messages: [{
+          id: 'm1', session_id: 's1', message_type: 'assistant', content: '[ui-card]',
+          generation_result: { __chatmode: { resultData: surface } },
+          timestamp: '2026-06-11T07:00:00',
+        }, {
+          // NOT surface-shaped → no inference (stays typeless).
+          id: 'm2', session_id: 's1', message_type: 'assistant', content: '[ui-card]',
+          generation_result: { __chatmode: { resultData: { agents: [] } } },
+          timestamp: '2026-06-11T07:00:01',
+        }],
+      },
+    });
+
+    const [healed, other] = await api.getSessionMessages('s1');
+    expect(healed.resultType).toBe('a2ui');
+    expect(healed.resultData).toEqual(surface);
+    expect(other.resultType).toBeUndefined();
+  });
+
   it('maps user and system wire types to their roles', async () => {
     mockGet.mockResolvedValue({
       data: {
@@ -390,6 +461,95 @@ describe('sessionApi - card message persistence', () => {
       id: 'm-empty', role: 'assistant', content: '', timestamp: new Date(),
     });
     expect(mockPost).not.toHaveBeenCalled();
+  });
+});
+
+describe('sessionApi - per-message write ordering', () => {
+  // Regression: the store persists fire-and-forget, and a trace pill's
+  // promoting PUT fires milliseconds after its create POST (same poll batch).
+  // Unordered, the PUT reached the backend before the create committed and
+  // 404'd ("Chat message not found") — losing the pill's tool_result context
+  // on reload. Writes to the same message id must run strictly in order.
+  const deferred = () => {
+    let resolve!: (v: unknown) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  const traceMsg = {
+    id: 'm-pill', role: 'assistant' as const, content: '', timestamp: new Date(),
+    resultType: 'trace', resultData: { kind: 'tool_call' },
+  };
+
+  it('an update PUT waits for the pending create POST of the same message', async () => {
+    const create = deferred();
+    mockPost.mockReturnValue(create.promise);
+    mockPut.mockResolvedValue({ data: {} });
+
+    const addPromise = api.addMessageToSession('s1', traceMsg);
+    const updatePromise = api.updateMessageInSession('s1', 'm-pill', {
+      resultType: 'trace', resultData: { kind: 'tool_result' },
+    });
+    await flush();
+
+    // Create still in flight → the promoting PUT must not have raced past it.
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPut).not.toHaveBeenCalled();
+
+    create.resolve({ data: {} });
+    await Promise.all([addPromise, updatePromise]);
+
+    expect(mockPut).toHaveBeenCalledWith('/chat-history/messages/m-pill', {
+      generation_result: { __chatmode: { resultType: 'trace', resultData: { kind: 'tool_result' } } },
+    });
+  });
+
+  it('a failed create does not block the follow-up update', async () => {
+    const create = deferred();
+    mockPost.mockReturnValue(create.promise);
+    mockPut.mockResolvedValue({ data: {} });
+
+    const addPromise = api.addMessageToSession('s1', traceMsg).catch(() => undefined);
+    const updatePromise = api.updateMessageInSession('s1', 'm-pill', { content: 'x' });
+    await flush();
+    expect(mockPut).not.toHaveBeenCalled();
+
+    create.reject(new Error('create failed'));
+    await Promise.all([addPromise, updatePromise]);
+
+    expect(mockPut).toHaveBeenCalledWith('/chat-history/messages/m-pill', { content: 'x' });
+  });
+
+  it('writes to different message ids do not wait on each other', async () => {
+    const create = deferred();
+    mockPost.mockReturnValue(create.promise);
+    mockPut.mockResolvedValue({ data: {} });
+
+    void api.addMessageToSession('s1', traceMsg);
+    await api.updateMessageInSession('s1', 'm-other', { content: 'independent' });
+
+    // m-other's PUT completed while m-pill's create is still in flight.
+    expect(mockPut).toHaveBeenCalledWith('/chat-history/messages/m-other', { content: 'independent' });
+
+    create.resolve({ data: {} });
+  });
+
+  it('successive updates to the same message run in order', async () => {
+    const first = deferred();
+    mockPut.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ data: {} });
+
+    const p1 = api.updateMessageInSession('s1', 'm1', { content: 'v1' });
+    const p2 = api.updateMessageInSession('s1', 'm1', { content: 'v2' });
+    await flush();
+    expect(mockPut).toHaveBeenCalledTimes(1);
+
+    first.resolve({ data: {} });
+    await Promise.all([p1, p2]);
+
+    expect(mockPut).toHaveBeenCalledTimes(2);
+    expect(mockPut).toHaveBeenNthCalledWith(2, '/chat-history/messages/m1', { content: 'v2' });
   });
 });
 

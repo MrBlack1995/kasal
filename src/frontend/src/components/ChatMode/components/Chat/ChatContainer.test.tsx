@@ -298,6 +298,42 @@ describe('ChatContainer — run-activity container (RunProgress)', () => {
     expect(screen.getByText(/q2/)).toBeInTheDocument();
   });
 
+  it('keeps non-tool_result steps (pending calls, events) visible after the run completes', () => {
+    // Regression: anything shown while the run streamed must not vanish when it
+    // ends — the timeline previously filtered to kind==='tool_result' only.
+    render(
+      <ChatContainer
+        {...baseProps}
+        messages={[
+          msg('u', 'q'),
+          traceMsg('c1', 'ScrapeTool', { kind: 'tool_call', sublabel: 'fetching the page' }),
+          traceMsg('e1', "⚠ MCP server 'x': HTTP 403 - Forbidden", { kind: 'event' }),
+          traceMsg('r1', 'Memory', { detail: 'recalled 3 items' }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText('Expand run activity'));
+    expect(screen.getByText('Reading sources')).toBeInTheDocument(); // the pending call
+    expect(screen.getByText(/HTTP 403/)).toBeInTheDocument(); // the event
+    expect(screen.getByText('Recalling context')).toBeInTheDocument(); // the result
+  });
+
+  it('clicking a step ROW opens that step in the preview pane (focusStep passed through)', () => {
+    const onShowRunInPane = vi.fn();
+    render(
+      <ChatContainer
+        {...baseProps}
+        messages={[msg('u'), traceMsg('m1', 'Memory', { sublabel: 'context retrieved', detail: 'WTI closed at $78.12' })]}
+        onShowRunInPane={onShowRunInPane}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText('Expand run activity'));
+    fireEvent.click(screen.getByLabelText('Open the full context for Recalling context'));
+    expect(onShowRunInPane).toHaveBeenCalledTimes(1);
+    const [, , focusStep] = onShowRunInPane.mock.calls[0];
+    expect(focusStep).toMatchObject({ label: 'Memory', detail: 'WTI closed at $78.12' });
+  });
+
   it('after the run (not executing) shows "Run activity" and no Stop', () => {
     render(<ChatContainer {...baseProps} messages={[msg('u', 'q'), traceMsg('t1', 'PerplexityTool')]} />);
     expect(screen.getByText('Run activity')).toBeInTheDocument();
@@ -376,7 +412,10 @@ describe('ChatContainer — run-activity container (RunProgress)', () => {
     expect(screen.getAllByText(/find stock photos/).length).toBeGreaterThan(0);
   });
 
-  it('keeps an inline-rendered Genie answer in the chat (not inside the container)', () => {
+  it('folds a Genie trace into the run-activity container (answers render via the A2UI surface)', () => {
+    // Genie's inline trace renderer was removed on purpose: its ANSWER now
+    // arrives as the shared A2UI surface like every other deliverable, so the
+    // trace itself is plain run activity — grouped, not a standalone bubble.
     const genie = {
       id: 'g1',
       role: 'assistant',
@@ -386,8 +425,8 @@ describe('ChatContainer — run-activity container (RunProgress)', () => {
       resultData: { label: 'GenieTool', kind: 'tool_result', detail: 'SQL Query:\nSELECT 1' },
     } as unknown as ChatMessageType;
     render(<ChatContainer {...baseProps} messages={[msg('u', 'q'), genie]} />);
-    // The Genie trace renders as a normal chat message (stubbed), not folded away.
-    expect(screen.getByTestId('msg-g1')).toBeInTheDocument();
+    expect(screen.queryByTestId('msg-g1')).toBeNull();
+    expect(screen.getByText('Run activity')).toBeInTheDocument();
   });
 
   it('renders a completed run as plain conversation — no card, no leftover container', () => {

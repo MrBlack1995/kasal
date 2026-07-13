@@ -1,6 +1,6 @@
 # Security
 
-Kasal runs AI agent workflows against your enterprise data, so security spans identity, workspace isolation, agent guardrails, and the dependency supply chain. This page is a concise overview; each section links to the detailed guide for depth.
+Kasal runs AI agent workflows against your enterprise data, so security spans identity, teamspace isolation, agent guardrails, and the dependency supply chain. This page is a concise overview; each section links to the detailed guide for depth.
 
 ## Identity and on-behalf-of (OBO)
 
@@ -8,9 +8,19 @@ Every action runs as the signed-in user. All Databricks resource access (Unity C
 
 See [security compliance](./README_SECURITY_COMPLIANCE.md) (design items D1 to D4) for details.
 
-## Workspace isolation
+## Teamspace isolation
 
-Kasal is multi-tenant and group-aware. Resources and permissions are scoped to the workspace (group) context so that one workspace's data, executions, and configuration do not leak into another. All LLM and embedding calls route through Databricks model serving endpoints in the workspace; the platform does not create or use fine-tuned models that could encode sensitive information.
+Kasal is multi-tenant and group-aware. Resources and permissions are scoped to the teamspace (group) context so that one teamspace's data, executions, and configuration do not leak into another. All LLM and embedding calls route through Databricks model serving endpoints in the Databricks workspace; the platform does not create or use fine-tuned models that could encode sensitive information.
+
+## Secrets and encryption at rest
+
+Sensitive values — provider API keys, MCP server credentials, Databricks personal access tokens, and encrypted tool configurations — are stored encrypted in the application database (SQLite in local development, Databricks Lakebase in production). Only ciphertext is persisted; plaintext secrets are never written to the database, to `.env` files, or to logs.
+
+**Cipher.** Encryption uses a hybrid scheme (`EncryptionUtils`): each value is encrypted with a freshly generated symmetric (Fernet) key, and that symmetric key is then encrypted with an RSA public key. Reversing it requires the RSA private key, so a value can only be read by an instance that holds the key.
+
+**Key storage.** The RSA key pair is generated on first use and kept on the application's filesystem at `~/.backendcrew/keys/` (private key with owner-only permissions). It is created once and reused for the life of that environment — including across ordinary redeploys — so values encrypted under it stay decryptable from one deployment to the next.
+
+**Rotation and recovery.** The key is regenerated only when the key files are absent — on a first-ever startup, or after a full environment recreation / filesystem reset (not a routine redeploy). Any value encrypted under a previous key cannot be decrypted afterward and must be re-entered. The log line `Error decrypting value with SSH key: Decryption failed` is the signal that a stored secret predates the current key and needs re-saving.
 
 ## Agent guardrails
 
