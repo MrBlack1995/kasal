@@ -82,7 +82,14 @@ class UCMetricViewGeneratorTool(BaseTool):
                        'use_llm_fallback', 'translation_mode', 'llm_model', 'llm_workspace_url', 'llm_token',
                        'workspace_id', 'dataset_id', 'tenant_id', 'client_id',
                        'client_secret', 'username', 'password', 'auth_method',
-                       'access_token', 'pbi_api_base_url')
+                       'access_token', 'pbi_api_base_url',
+                       # Best-effort UCMV for thin-report models (no M-Query source
+                       # tables). Opt-in only; see thin-report-and-source-resolution.md.
+                       #   allow_best_effort : gate (default off → today's behavior)
+                       #   fact_source_map   : { pbi_table : "catalog.schema.table" }
+                       #                       physical sources the human supplies when
+                       #                       the model didn't carry them.
+                       'allow_best_effort', 'fact_source_map')
         default_config = {}
         for key in config_keys:
             val = kwargs.pop(key, None)
@@ -366,6 +373,32 @@ class UCMetricViewGeneratorTool(BaseTool):
         # regardless of whether the transpilation pipeline succeeded.
         fallback_extract = self._build_fallback_extract(measures, mquery_entries)
 
+        # ── Opt-in best-effort views for a THIN-REPORT model ────────────────
+        # When the normal path produced 0 views AND the user opted in
+        # (allow_best_effort) AND supplied physical sources (fact_source_map),
+        # draft thin UCMVs from measures that already resolved to real SQL. This
+        # is the fallback-of-the-fallback — the preferred fix is to convert the
+        # upstream semantic model (see thin-report-and-source-resolution.md). The
+        # coverage_report makes the gap explicit (tables/measures skipped), and
+        # every drafted measure is flagged TODO: verify.
+        best_effort_report = None
+        if (not yaml_output) and _get('allow_best_effort') and _get('fact_source_map'):
+            fsm = _get('fact_source_map')
+            if isinstance(fsm, str):
+                try:
+                    fsm = json.loads(fsm)
+                except Exception:
+                    fsm = None
+            be_views, best_effort_report = self._build_best_effort_views(
+                fact_source_map=fsm, config=config, measures=measures)
+            if be_views:
+                yaml_output = be_views
+                logger.warning(
+                    f"[UCMVGenerator] BEST-EFFORT mode: drafted {best_effort_report['tables_emitted']} "
+                    f"view(s) / {best_effort_report['measures_emitted']} measure(s) from a thin report; "
+                    f"{best_effort_report['measures_skipped_unresolved']} measure(s) unresolved and skipped. "
+                    f"Tables/measures may be MISSING — every measure marked TODO: verify.")
+
         output = {
             'yaml': yaml_output,
             'sql': sql_output,
@@ -379,6 +412,9 @@ class UCMetricViewGeneratorTool(BaseTool):
             # Always present; the UI shows it as a tabular reference and falls back
             # to it as the primary artifact when `yaml` is empty (0 views).
             'fallback_extract': fallback_extract,
+            # Present only when best-effort mode fired: surfaces the coverage gap
+            # (skipped tables/measures) so the UI/consumer can warn "may be missing".
+            'best_effort_report': best_effort_report,
             'views_generated': len(yaml_output) if isinstance(yaml_output, dict) else 0,
             'specs_summary': {
                 k: {
@@ -510,6 +546,112 @@ class UCMetricViewGeneratorTool(BaseTool):
             r['measure_count'] = len(r['measures'])
             r['has_mquery'] = bool(r['mquery'])
         return rows
+
+    @staticmethod
+    def _build_best_effort_views(
+        fact_source_map: Any,
+        config: Any,
+        measures: Any,
+    ) -> tuple[dict, dict]:
+        """Best-effort UCMVs for a THIN-REPORT model (no M-Query source tables).
+
+        Opt-in fallback used ONLY when the normal path produced 0 views AND the
+        human supplied `fact_source_map` (PBI table -> physical catalog.schema.table).
+        See docs/powerbi/thin-report-and-source-resolution.md — the PREFERRED fix is
+        to point Kasal at the upstream semantic model; this is for when that model is
+        unreachable.
+
+        Emits one thin metric view per supplied source, containing only measures that
+        ALREADY resolved to real aggregatable SQL in `config['measure_resolutions']`
+        (reusing the pipeline's own base_expr + base_filters). It NEVER fabricates SQL:
+        - measures with a `TODO`/empty resolution are skipped (documented, not emitted);
+        - tables not in `fact_source_map` are skipped;
+        so the "never emit silently-wrong SQL" contract holds.
+
+        Every emitted measure is flagged `TODO: verify` because it is a DRAFT produced
+        without a validated transpiled source. Returns (views, coverage_report) where
+        coverage_report makes the GAP explicit — tables/measures that were skipped.
+        """
+        views: dict = {}
+        report = {
+            'mode': 'best_effort',
+            'warning': ('DRAFT views built from a thin report without validated source '
+                        'tables. Tables/measures may be MISSING; every emitted measure '
+                        'is marked "TODO: verify". Prefer converting the upstream '
+                        'semantic model — see thin-report-and-source-resolution.md.'),
+            'sources_supplied': 0,
+            'tables_emitted': 0,
+            'measures_emitted': 0,
+            'measures_skipped_unresolved': 0,
+            'tables_without_source': [],
+            'skipped_measures': [],
+        }
+        if not isinstance(fact_source_map, dict) or not fact_source_map:
+            return views, report
+        resolutions = (config or {}).get('measure_resolutions', {}) if isinstance(config, dict) else {}
+        report['sources_supplied'] = len(fact_source_map)
+
+        _AGG = ('SUM', 'COUNT', 'AVG', 'MIN', 'MAX', 'DIVIDE', 'CALCULATE', 'SUMX', 'COUNTX')
+
+        def _to_snake(name: str) -> str:
+            import re as _re
+            s = _re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).strip('_').lower()
+            return s or 'measure'
+
+        def _alloc(m: dict) -> str:
+            return (m.get('proposed_allocation') or m.get('table_name')
+                    or m.get('table') or '__unassigned__')
+
+        # measure name -> its allocated PBI table (from the measures list)
+        measure_table = {}
+        if isinstance(measures, list):
+            for m in measures:
+                if isinstance(m, dict):
+                    nm = m.get('measure_name') or m.get('original_name') or ''
+                    if nm:
+                        measure_table[nm] = _alloc(m)
+
+        # group RESOLVED measures by their allocated PBI table
+        by_table: dict[str, list] = {}
+        for mname, res in (resolutions or {}).items():
+            base = (res or {}).get('base_expr', '') if isinstance(res, dict) else ''
+            if (not base) or base.strip().upper().startswith('TODO') \
+                    or not base.strip().upper().startswith(_AGG):
+                report['measures_skipped_unresolved'] += 1
+                report['skipped_measures'].append(mname)
+                continue
+            by_table.setdefault(measure_table.get(mname, '__unassigned__'), []).append((mname, res))
+
+        for pbi_table, source in fact_source_map.items():
+            rows = by_table.get(pbi_table, [])
+            if not rows:
+                report['tables_without_source'].append(pbi_table)
+                continue
+            measures_out = []
+            for mname, res in rows:
+                expr = res['base_expr']
+                filters = res.get('base_filters') or []
+                if filters:
+                    expr = f"{expr} FILTER (WHERE {' AND '.join(filters)})"
+                measures_out.append({
+                    'name': _to_snake(mname),
+                    'expr': expr,
+                    'comment': (f"BEST-EFFORT DRAFT — no validated source. TODO: verify. "
+                                f"From DAX '{mname}'."),
+                })
+            views[pbi_table] = {
+                'version': '1.1',
+                'source': source,
+                'comment': (f"BEST-EFFORT UC Metric View (thin-report model). "
+                            f"{len(measures_out)} measures drafted from resolved SQL; "
+                            f"NOT validated against a transpiled source. Review before "
+                            f"deploy. Some measures/tables from the original model may "
+                            f"be MISSING."),
+                'measures': measures_out,
+            }
+            report['tables_emitted'] += 1
+            report['measures_emitted'] += len(measures_out)
+        return views, report
 
     async def _save_dax_to_conversion_history(
         self,
