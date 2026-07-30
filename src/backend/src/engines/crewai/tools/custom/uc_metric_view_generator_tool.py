@@ -381,6 +381,16 @@ class UCMetricViewGeneratorTool(BaseTool):
         # upstream semantic model (see thin-report-and-source-resolution.md). The
         # coverage_report makes the gap explicit (tables/measures skipped), and
         # every drafted measure is flagged TODO: verify.
+        # When nothing generated, always compute an actionable diagnosis of WHY
+        # (thin report? no source? unresolvable DAX?) so the run is never a silent
+        # empty result. Computed before best-effort so it reflects the real state.
+        zero_view_diagnosis = None
+        if not yaml_output:
+            zero_view_diagnosis = self._diagnose_zero_views(mquery_entries, measures, config)
+            logger.warning(
+                f"[UCMVGenerator] 0 views — {zero_view_diagnosis['case']}: "
+                f"{zero_view_diagnosis['recommended_action']}")
+
         best_effort_report = None
         if (not yaml_output) and _get('allow_best_effort') and _get('fact_source_map'):
             fsm = _get('fact_source_map')
@@ -415,6 +425,9 @@ class UCMetricViewGeneratorTool(BaseTool):
             # Present only when best-effort mode fired: surfaces the coverage gap
             # (skipped tables/measures) so the UI/consumer can warn "may be missing".
             'best_effort_report': best_effort_report,
+            # Present when 0 views generated: actionable "why + what to do" so a
+            # thin-report run is never a silent empty result.
+            'zero_view_diagnosis': zero_view_diagnosis,
             'views_generated': len(yaml_output) if isinstance(yaml_output, dict) else 0,
             'specs_summary': {
                 k: {
@@ -546,6 +559,88 @@ class UCMetricViewGeneratorTool(BaseTool):
             r['measure_count'] = len(r['measures'])
             r['has_mquery'] = bool(r['mquery'])
         return rows
+
+    @staticmethod
+    def _diagnose_zero_views(
+        mquery_entries: Any,
+        measures: Any,
+        config: Any,
+    ) -> dict:
+        """Explain WHY 0 UC Metric Views were generated, and what to do about it.
+
+        Today a thin-report model silently yields a fallback JSON and no views, with
+        no signal to the user about the cause or fix. This turns that into an
+        actionable diagnosis (the real, testable part of the "source not auto-
+        resolved" problem). It classifies the run by two deterministic signals:
+          * source tables present?  → any mquery entry with real transpiled SQL /
+            an M source expression (not raw/empty).
+          * measures resolvable?    → any config.measure_resolutions with real
+            aggregatable SQL (not TODO).
+
+        Returns {case, reason, recommended_action, signals} — see the customer guide
+        thin-report-and-source-resolution.md for the three cases.
+        """
+        # Signal 1: do we have any real source table?
+        has_source = False
+        if isinstance(mquery_entries, list):
+            for e in mquery_entries:
+                if not isinstance(e, dict):
+                    continue
+                sql = (e.get('transpiled_sql') or e.get('mquery_expression') or '').strip()
+                if sql and sql not in ('{}', 'null'):
+                    has_source = True
+                    break
+
+        # Signal 2: any measure that resolved to real aggregatable SQL?
+        resolvable = 0
+        _AGG = ('SUM', 'COUNT', 'AVG', 'MIN', 'MAX', 'DIVIDE', 'CALCULATE', 'SUMX', 'COUNTX')
+        resolutions = (config or {}).get('measure_resolutions', {}) if isinstance(config, dict) else {}
+        for res in (resolutions or {}).values():
+            base = (res or {}).get('base_expr', '') if isinstance(res, dict) else ''
+            if base and not base.strip().upper().startswith('TODO') \
+                    and base.strip().upper().startswith(_AGG):
+                resolvable += 1
+
+        n_measures = len(measures) if isinstance(measures, list) else 0
+        signals = {
+            'has_source_tables': has_source,
+            'resolvable_measures': resolvable,
+            'total_measures': n_measures,
+        }
+
+        if has_source:
+            # Sources exist but still 0 views — a translation/allocation issue, not
+            # a thin-report problem. Leave it to the normal migration report.
+            return {
+                'case': 'sources_present_no_views',
+                'reason': ('Source tables were found but no metric view was emitted — '
+                           'likely all measures were untranslatable DAX. See the '
+                           'migration report / not-emitted notes.'),
+                'recommended_action': 'Review the not-emitted measures; no source mapping needed.',
+                'signals': signals,
+            }
+        # No source tables → thin report (case B) or hand-entered (case C).
+        if resolvable > 0:
+            action = (f"This looks like a THIN REPORT on an upstream semantic model — its "
+                      f"source tables are not in what was extracted. PREFERRED: re-run "
+                      f"against the upstream model's dataset_id (see Power BI lineage). "
+                      f"OR: enable allow_best_effort and supply fact_source_map to draft "
+                      f"views for the {resolvable} resolvable measure(s) — tables/measures "
+                      f"may be missing. See thin-report-and-source-resolution.md.")
+        else:
+            action = ("This looks like a THIN REPORT (or a report-logic-only model): no "
+                      "source tables AND no measures reduce to a table aggregate (mostly "
+                      "selector / measure-on-measure DAX). Re-run against the upstream "
+                      "semantic model's dataset_id if one exists; otherwise these measures "
+                      "cannot be converted to metric views. See "
+                      "thin-report-and-source-resolution.md.")
+        return {
+            'case': 'thin_report_no_source_tables',
+            'reason': ('No source tables (M-Queries) were found in the extracted model, so '
+                       'there is no physical table to build a UC Metric View on.'),
+            'recommended_action': action,
+            'signals': signals,
+        }
 
     @staticmethod
     def _build_best_effort_views(

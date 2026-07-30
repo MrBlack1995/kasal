@@ -117,3 +117,53 @@ class TestBuildBestEffortViews:
         )
         assert "may be MISSING" in report["warning"]
         assert "upstream semantic model" in report["warning"]
+
+
+class TestDiagnoseZeroViews:
+    """The actionable 'why 0 views + what to do' diagnosis for empty runs."""
+
+    def test_thin_report_with_resolvable_measures(self):
+        # No source tables, but some measures resolved → thin report, best-effort viable.
+        d = UCMetricViewGeneratorTool._diagnose_zero_views(
+            mquery_entries=[{"table_name": "t", "transpiled_sql": ""}],  # no real source
+            measures=[{"measure_name": "m"}],
+            config=_config({"m": {"base_expr": "SUM(source.x)", "base_filters": []}}),
+        )
+        assert d["case"] == "thin_report_no_source_tables"
+        assert d["signals"]["has_source_tables"] is False
+        assert d["signals"]["resolvable_measures"] == 1
+        assert "upstream" in d["recommended_action"].lower()
+        assert "fact_source_map" in d["recommended_action"]
+
+    def test_thin_report_no_resolvable_measures(self):
+        # No source, nothing resolves (the DCC signature) → cannot convert.
+        d = UCMetricViewGeneratorTool._diagnose_zero_views(
+            mquery_entries=[],
+            measures=[{"measure_name": "a"}, {"measure_name": "b"}],
+            config=_config({
+                "a": {"base_expr": "TODO: fill", "base_filters": []},
+                "b": {"base_expr": "SELECTEDVALUE(x)", "base_filters": []},
+            }),
+        )
+        assert d["case"] == "thin_report_no_source_tables"
+        assert d["signals"]["resolvable_measures"] == 0
+        assert "cannot be converted" in d["recommended_action"]
+
+    def test_sources_present_but_no_views(self):
+        # Real source tables exist → not a thin-report problem.
+        d = UCMetricViewGeneratorTool._diagnose_zero_views(
+            mquery_entries=[{"table_name": "t", "transpiled_sql": "SELECT * FROM cat.sch.t"}],
+            measures=[{"measure_name": "m"}],
+            config=_config({}),
+        )
+        assert d["case"] == "sources_present_no_views"
+        assert d["signals"]["has_source_tables"] is True
+        assert "no source mapping needed" in d["recommended_action"].lower()
+
+    def test_mquery_expression_counts_as_source(self):
+        d = UCMetricViewGeneratorTool._diagnose_zero_views(
+            mquery_entries=[{"table_name": "t", "mquery_expression": "let Source = Sql.Database(...)"}],
+            measures=[],
+            config=_config({}),
+        )
+        assert d["signals"]["has_source_tables"] is True
