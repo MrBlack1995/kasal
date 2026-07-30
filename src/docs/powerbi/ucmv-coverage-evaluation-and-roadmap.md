@@ -38,12 +38,37 @@ measures that reduce to single-table aggregates.
   — 20% PAAT, 32% DCC), disconnected/parameter tables, and text/format measures.
   These are report interaction state, not data — no static SQL equivalent exists.
 
+## The better fix first: resolve the upstream semantic model
+
+PAAT/DCC are **thin reports on an upstream/external semantic model** — the model
+that holds the M-Queries and physical tables is a *separate dataset*, not the one
+these runs extracted. So the highest-value fix is **not** to manually re-supply the
+missing sources; it is to **extract the underlying model's `dataset_id`** (which has
+everything, like SC did). Kasal already extracts by `dataset_id` via `executeQueries`
+(`powerbi_semantic_model_dax_tool.py`), so this is largely an *input* choice today
+and an *automation* opportunity tomorrow:
+
+- **Today (operational):** point the run at the upstream model's `dataset_id`
+  (found via Power BI lineage / `GET /reports/{id}` → `datasetId`). Full case-A
+  extraction, no code change.
+- **Feature (automate):** thin-report detection + upstream resolution — when
+  extraction finds no M-Queries, read the report's `datasetId`, check whether it is a
+  live-connection / DirectQuery-to-dataset, and **follow it to the base model** before
+  extracting. The REST surface exists (`/reports/{id}`, `/datasets/{id}`); Kasal does
+  not chase the upstream link yet — that is the gap.
+
+`fact_source_map` (below) is the **fallback-of-the-fallback**: only for when the
+upstream model is genuinely unreachable (external AAS/SSAS cube, or no access to the
+dataset). See the customer-facing guide **`thin-report-and-source-resolution.md`**
+(exposed in the in-app Documentation → Power BI migration).
+
 ## What to adapt in the repo
 
 Ordered by leverage. Phases 1–3 are the shared "best-effort UCMV" feature that
 turns PAAT's "0 views + JSON dump" into "a few real fact views + an honest gap".
 All gated behind an explicit `allow_best_effort` flag so today's default contract
-("never emit silently-wrong SQL") is unchanged when off.
+("never emit silently-wrong SQL") is unchanged when off. **Prefer upstream-model
+resolution (above) over best-effort whenever the base model is reachable.**
 
 ### 1. `fact_source_map` supply mechanism — THE unlock (no code path works without it)
 - **`pipeline_config_generator_tool.py`** — add `fact_source_map` and
