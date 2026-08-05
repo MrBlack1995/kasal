@@ -64,12 +64,20 @@ class ExecutionNameService:
 
     async def _get_name_template(self) -> str:
         """Fetch the ``generate_job_name`` template, opening a standalone session
-        when none was injected (so the read never hits a ``None`` session)."""
+        when none was injected (so the read never hits a ``None`` session).
+
+        Uses ``async_session_factory`` directly rather than
+        ``request_scoped_session()``: the latter REUSES the request-scoped session
+        when the ContextVar is set (which it is for a task spawned during an HTTP
+        request), and sharing that session with the in-flight request raises
+        "This session is provisioning a new connection; concurrent operations are
+        not permitted". A private session cannot contend with the request.
+        """
         if self.template_service is not None:
             return await self.template_service.get_template_content("generate_job_name")
-        from src.db.session import request_scoped_session
+        from src.db.session import async_session_factory
         from src.services.template_service import TemplateService
-        async with request_scoped_session() as session:
+        async with async_session_factory() as session:
             return await TemplateService(session).get_template_content("generate_job_name")
 
     async def _log_llm_interaction(self, endpoint: str, prompt: str, response: str, model: str) -> None:
@@ -92,10 +100,13 @@ class ExecutionNameService:
                     status='success'
                 )
             else:
-                # No injected session: open a standalone one and COMMIT (the
+                # No injected session: open a PRIVATE one and COMMIT (the
                 # repository only flushes — a request would normally commit at end).
-                from src.db.session import request_scoped_session
-                async with request_scoped_session() as session:
+                # async_session_factory (not request_scoped_session) so this write
+                # never joins — and so never contends with — an in-flight request
+                # transaction. See _get_name_template for the full rationale.
+                from src.db.session import async_session_factory
+                async with async_session_factory() as session:
                     await LLMLogService.create(session).create_log(
                         endpoint=endpoint,
                         prompt=prompt,
@@ -126,6 +137,22 @@ class ExecutionNameService:
             Response containing the generated name
         """
         try:
+            # Standalone mode (no injected session): this call runs off a task that
+            # INHERITED the HTTP request's context, so the `_request_session`
+            # ContextVar still points at the request-scoped session. Any nested
+            # `request_scoped_session()` — notably the model-config read inside
+            # LLMManager.configure_crewai_llm — would then reuse that shared session
+            # and race the in-flight request ("This session is provisioning a new
+            # connection; concurrent operations are not permitted"). Detaching makes
+            # every nested read open a private session. Only mutates THIS task's
+            # context copy, never the originating request's.
+            if getattr(self, "_session", None) is None:
+                try:
+                    from src.db.session import detach_request_session
+                    detach_request_session()
+                except Exception as _detach_err:  # never block naming on this
+                    logger.debug(f"Could not detach request session: {_detach_err}")
+
             # Get the template for name generation (opens its own session when none
             # was injected — the chat auto-execute path builds this service with
             # session=None). This template already includes instructions to only
