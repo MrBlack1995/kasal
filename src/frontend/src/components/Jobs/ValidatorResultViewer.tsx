@@ -112,6 +112,22 @@ export interface ValidatorResult {
     switch?: number;
     manual_override?: number;
   }>;
+  /** Non-transpiled measures passed through from the UCMV generator (not evaluated
+   *  here — they have no SQL). Lets reviewers see WHICH measures were not emitted
+   *  and why, next to the per-table quality counts. */
+  untranslatable_items?: ValidatorUntranslatableItem[];
+}
+
+/** One non-transpiled measure surfaced for review in the validation summary. */
+export interface ValidatorUntranslatableItem {
+  table_key: string;
+  view_name?: string;
+  original_name: string;
+  dax_expression?: string;
+  skip_reason?: string;
+  category?: string;
+  dax_class?: string | null;
+  referenced_by?: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -201,6 +217,13 @@ const ValidatorResultViewer: React.FC<{ result: ValidatorResult }> = ({ result }
     return base;
   }, [result]);
   const hasYaml = yamlData && Object.keys(yamlData).length > 0;
+
+  // Non-transpiled measures, highest-impact first (most-referenced at the top) so
+  // reviewers triage the measures other measures depend on before the leaves.
+  const untranslatableItems = useMemo<ValidatorUntranslatableItem[]>(() => {
+    const items = Array.isArray(result.untranslatable_items) ? result.untranslatable_items : [];
+    return [...items].sort((a, b) => (b.referenced_by ?? 0) - (a.referenced_by ?? 0));
+  }, [result.untranslatable_items]);
 
   const handleDownloadYaml = (tableName: string) => {
     if (!yamlData?.[tableName]) return;
@@ -309,6 +332,17 @@ const ValidatorResultViewer: React.FC<{ result: ValidatorResult }> = ({ result }
           </Box>
           <Typography variant="caption" color="text.secondary">Tables Passing</Typography>
         </Paper>
+        {untranslatableItems.length > 0 && (
+          <Paper variant="outlined" sx={{ p: 2, flex: 1, minWidth: 150, textAlign: 'center' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+              <WarningAmberIcon sx={{ color: 'warning.main' }} />
+              <Typography variant="h4" sx={{ fontWeight: 700, color: 'warning.main' }}>
+                {untranslatableItems.length}
+              </Typography>
+            </Box>
+            <Typography variant="caption" color="text.secondary">Not Transpiled</Typography>
+          </Paper>
+        )}
       </Box>
 
       {/* Overall progress bar */}
@@ -494,6 +528,68 @@ const ValidatorResultViewer: React.FC<{ result: ValidatorResult }> = ({ result }
           })}
         </TableBody>
       </Table>
+
+      {/* Not transpiled — which measures were NOT emitted, and why. The per-table
+          counts above say HOW MANY; this says WHICH + the reason, so a reviewer can
+          investigate without opening the YAML comments. */}
+      {untranslatableItems.length > 0 && (
+        <>
+          <Divider />
+          <Accordion variant="outlined" disableGutters sx={{ '&:before': { display: 'none' } }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Box display="flex" alignItems="center" gap={1}>
+                <WarningAmberIcon sx={{ color: 'warning.main', fontSize: 20 }} />
+                <Typography variant="subtitle2">Not transpiled</Typography>
+                <Chip size="small" label={untranslatableItems.length} color="warning" variant="outlined" />
+                <Typography variant="caption" color="text.secondary">
+                  measures not emitted as UC metric-view measures — with the reason
+                </Typography>
+              </Box>
+            </AccordionSummary>
+            <AccordionDetails sx={{ p: 0 }}>
+              <Table size="small" sx={{ tableLayout: 'fixed' }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600, width: '18%' }}>Measure</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '16%' }}>Table</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '22%' }}>Reason</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '36%' }}>DAX</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '8%' }} align="right" title="How many other measures reference this one">Used by</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {untranslatableItems.map((item, i) => (
+                    <TableRow key={`${item.table_key}::${item.original_name}::${i}`} hover>
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem', wordBreak: 'break-word' }}>
+                        {item.original_name}
+                      </TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-word' }}>
+                        {item.view_name || item.table_key}
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.7rem', wordBreak: 'break-word' }}>
+                        {item.category && (
+                          <Chip size="small" label={item.category} color="warning" variant="outlined" sx={{ fontSize: '0.65rem' }} />
+                        )}
+                        {item.skip_reason && (
+                          <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.5 }}>
+                            {item.skip_reason}
+                          </Typography>
+                        )}
+                      </TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+                        {item.dax_expression || '—'}
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.75rem' }} align="right">
+                        {item.referenced_by && item.referenced_by > 0 ? item.referenced_by : '—'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </AccordionDetails>
+          </Accordion>
+        </>
+      )}
 
       {/* YAML Viewer Dialog */}
       <Dialog

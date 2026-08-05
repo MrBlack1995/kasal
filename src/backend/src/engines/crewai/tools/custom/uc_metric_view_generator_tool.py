@@ -429,6 +429,10 @@ class UCMetricViewGeneratorTool(BaseTool):
             # thin-report run is never a silent empty result.
             'zero_view_diagnosis': zero_view_diagnosis,
             'views_generated': len(yaml_output) if isinstance(yaml_output, dict) else 0,
+            # Flattened non-transpiled measures for the validation-UI review panel
+            # (full DAX + reason + category + dependency count). Additive; [] when
+            # everything translated.
+            'untranslatable_items': self._build_untranslatable_items(results.get('specs', {})),
             'specs_summary': {
                 k: {
                     'view_name': v.get('view_name'),
@@ -499,6 +503,36 @@ class UCMetricViewGeneratorTool(BaseTool):
                 'proposed_allocation': m.get('proposed_allocation') or '',
             })
         return extract
+
+    @staticmethod
+    def _build_untranslatable_items(specs: dict) -> list:
+        """Flatten every spec's untranslatable measures into one UI-ready list.
+
+        Feeds the validation-UI "Not transpiled" review panel: reviewers see the
+        non-emitted measures as first-class rows (original DAX + why skipped +
+        category + dependency in-degree) instead of digging through the YAML
+        `-- comment` block. Additive — does not change any existing output field.
+        Each row is keyed by (table_key, original_name) on the frontend so review
+        annotations round-trip via the persisted result. Returns [] when nothing
+        was skipped.
+        """
+        items: list = []
+        for table_key, spec in (specs or {}).items():
+            view_name = spec.get('view_name')
+            for m in spec.get('untranslatable', []) or []:
+                items.append({
+                    'table_key': table_key,
+                    'view_name': view_name,
+                    'original_name': m.get('original_name') or m.get('name'),
+                    'dax_expression': m.get('dax_expression', ''),
+                    'skip_reason': m.get('skip_reason', ''),
+                    'category': m.get('category', ''),
+                    'dax_class': m.get('dax_class'),
+                    'referenced_by': m.get('referenced_by', 0),
+                })
+        # High-impact gaps first (most-depended-on measures at the top).
+        items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)
+        return items
 
     @staticmethod
     def _build_fallback_extract(measures: Any, mquery_entries: Any) -> list:

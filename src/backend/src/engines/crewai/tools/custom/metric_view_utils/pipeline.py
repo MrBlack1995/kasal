@@ -762,8 +762,16 @@ class MetricViewPipeline:
                 'untranslatable': [
                     {
                         'name': m.original_name,
+                        'original_name': m.original_name,
                         'skip_reason': m.skip_reason,
                         'category': m.category,
+                        # Rich fields for the validation-UI "Not transpiled" review
+                        # panel: the full original DAX, the LLM translation-class
+                        # label, and how many other measures depend on this one (so
+                        # reviewers can triage high-impact gaps first).
+                        'dax_expression': m.dax_expression,
+                        'dax_class': m.dax_class,
+                        'referenced_by': getattr(m, 'referenced_by', 0),
                     }
                     for m in spec.untranslatable
                 ],

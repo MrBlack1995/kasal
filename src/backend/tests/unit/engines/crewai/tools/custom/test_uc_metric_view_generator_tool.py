@@ -103,6 +103,68 @@ class TestBuildRawDaxExtract:
         assert extract[0]['dax_expression'] == ''
 
 
+class TestBuildUntranslatableItems:
+    """_build_untranslatable_items flattens per-spec untranslatable measures into
+    the UI review-panel list (full DAX + reason + category + impact)."""
+
+    def _specs(self):
+        return {
+            'fact_sales': {
+                'view_name': 'mv_fact_sales',
+                'untranslatable': [
+                    {
+                        'name': 'YoY Growth', 'original_name': 'YoY Growth',
+                        'skip_reason': 'prior-year time-intelligence',
+                        'category': 'cross_table',
+                        'dax_expression': 'CALCULATE([Sales], SAMEPERIODLASTYEAR(cal[date]))',
+                        'dax_class': 'unsupported', 'referenced_by': 3,
+                    },
+                    {
+                        'name': 'Sales Color', 'original_name': 'Sales Color',
+                        'skip_reason': 'display artifact', 'category': 'unassigned',
+                        'dax_expression': 'IF([Sales] > 0, "green", "red")',
+                        'dax_class': 'display_layer', 'referenced_by': 0,
+                    },
+                ],
+            },
+            'fact_empty': {'view_name': 'mv_empty', 'untranslatable': []},
+        }
+
+    def test_flattens_all_untranslatable_with_rich_fields(self):
+        items = UCMetricViewGeneratorTool._build_untranslatable_items(self._specs())
+        assert len(items) == 2
+        yoy = next(i for i in items if i['original_name'] == 'YoY Growth')
+        assert yoy['table_key'] == 'fact_sales'
+        assert yoy['view_name'] == 'mv_fact_sales'
+        assert yoy['dax_expression'].startswith('CALCULATE')
+        assert yoy['skip_reason'] == 'prior-year time-intelligence'
+        assert yoy['category'] == 'cross_table'
+        assert yoy['dax_class'] == 'unsupported'
+        assert yoy['referenced_by'] == 3
+
+    def test_sorted_by_impact_desc(self):
+        items = UCMetricViewGeneratorTool._build_untranslatable_items(self._specs())
+        # highest referenced_by first
+        assert items[0]['original_name'] == 'YoY Growth'
+        assert [i['referenced_by'] for i in items] == sorted(
+            [i['referenced_by'] for i in items], reverse=True)
+
+    def test_empty_specs_returns_empty(self):
+        assert UCMetricViewGeneratorTool._build_untranslatable_items({}) == []
+        assert UCMetricViewGeneratorTool._build_untranslatable_items(None) == []
+
+    def test_all_translated_returns_empty(self):
+        specs = {'fact_x': {'view_name': 'mv_x', 'untranslatable': []}}
+        assert UCMetricViewGeneratorTool._build_untranslatable_items(specs) == []
+
+    def test_falls_back_to_name_when_original_name_missing(self):
+        specs = {'t': {'view_name': 'v', 'untranslatable': [{'name': 'M1'}]}}
+        items = UCMetricViewGeneratorTool._build_untranslatable_items(specs)
+        assert items[0]['original_name'] == 'M1'
+        assert items[0]['dax_expression'] == ''
+        assert items[0]['referenced_by'] == 0
+
+
 class TestSaveDaxToConversionHistory:
     """_save_dax_to_conversion_history persists to conversion_history, fail-open."""
 
