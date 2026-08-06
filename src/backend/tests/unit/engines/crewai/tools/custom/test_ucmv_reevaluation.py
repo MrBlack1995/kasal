@@ -85,6 +85,40 @@ class TestRetryGating:
         ok, _ = is_retryable(item, review={review_key(item): {'status': 'todo'}})
         assert ok is True
 
+    def test_llm_declined_classes_are_not_retried(self):
+        """The LLM's own verdict is authoritative: if the LLM-first translator already
+        classified a measure as untranslatable, retrying at the SAME capability level
+        re-derives the same 'no' (and costs tokens with use_llm=true).
+
+        REGRESSION: before this gate, 73 of 104 real recorded failures were retried
+        even though the LLM had already declined 95 of them — the sweep looked busy
+        but proposed nothing.
+        """
+        for cls in ('unsupported', 'display_layer', 'out_of_scope', 'architecture_change'):
+            item = {'original_name': 'M', 'dax_expression': 'SUM(t[a])',
+                    'category': 'unassigned', 'dax_class': cls}
+            ok, why = is_retryable(item)
+            assert ok is False, cls
+            assert 'LLM already declined' in why
+
+    def test_llm_declined_can_be_opted_into(self):
+        item = {'original_name': 'M', 'dax_expression': 'SUM(t[a])',
+                'category': 'unassigned', 'dax_class': 'unsupported'}
+        assert is_retryable(item, include_impossible=True)[0] is True
+
+    def test_silent_wrong_guard_rejections_ARE_retried(self):
+        """Measures blocked by the silent-wrong guard (dropped ratio denominator,
+        dropped additive term, unresolved measure ref) are genuine candidates — the
+        LLM did not refuse them, the output guard did."""
+        for cls in (None, 'composed', 'translatable_direct'):
+            item = {
+                'original_name': 'Total_NSR', 'dax_expression': 'var a=...\nreturn a+b',
+                'category': 'unassigned', 'dax_class': cls,
+                'skip_reason': 'TODO — not emitted (would be silently wrong/invalid: '
+                               'additive term dropped)',
+            }
+            assert is_retryable(item)[0] is True, cls
+
     def test_review_key_matches_frontend_contract(self):
         assert review_key({'table_key': 'fact_x', 'original_name': 'My Measure'}) == 'fact_x::My Measure'
 

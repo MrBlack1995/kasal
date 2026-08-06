@@ -57,6 +57,17 @@ RETRYABLE_CATEGORIES = frozenset({
 # Review statuses that mean "a human settled this — stop proposing it".
 _SUPPRESSING_STATUSES = frozenset({'wont_fix', 'hand_written'})
 
+# dax_class verdicts the LLM-first translator assigns when IT has already examined a
+# measure and declined. Retrying these at the SAME capability level just re-derives
+# the same "no" (and costs tokens when use_llm=true), so they are skipped unless the
+# caller opts in. They are NOT the same as "nobody looked at it yet".
+LLM_DECLINED_CLASSES = frozenset({
+    'unsupported',
+    'display_layer',
+    'out_of_scope',
+    'architecture_change',
+})
+
 
 def review_key(item: dict) -> str:
     """Stable key matching the frontend's ``untranslatableKey`` (table::measure)."""
@@ -114,6 +125,14 @@ def is_retryable(
     if is_suppressed(item, review):
         return False, 'dismissed by reviewer'
     if not include_impossible:
+        # The LLM's own verdict is the strongest signal: if the LLM-first translator
+        # already examined this measure and classified it as untranslatable, retrying
+        # at the SAME capability level re-derives the same "no". Checked FIRST because
+        # it is more reliable than pattern-matching on free-text reasons.
+        dax_class = (item.get('dax_class') or '').strip()
+        if dax_class in LLM_DECLINED_CLASSES:
+            return False, f'LLM already declined at this capability level ({dax_class})'
+
         text = _classification_text(item)
         # Exact-category match (kept for the curated buckets) …
         category = (item.get('category') or '').strip()

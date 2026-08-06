@@ -297,7 +297,13 @@ async def translate_with_llm(
             measure.dax_class = cached.get('dax_class')
             measure.skip_reason = ''
         elif cached.get('dax_class'):
+            # Same terminal-verdict rule as the live path below: a cached DECLINE must
+            # not leave the fast-path's "routed to LLM" routing text in skip_reason.
             measure.dax_class = cached.get('dax_class')
+            measure.skip_reason = _llm_declined_reason(
+                measure.dax_class,
+                cached.get('error') or cached.get('explanation') or 'LLM could not translate',
+            )
         return measure
 
     # Build prompt
@@ -352,9 +358,35 @@ async def translate_with_llm(
         # Even on non-success, record the classification for reporting/telemetry.
         measure.dax_class = parsed.get('dax_class') or measure.dax_class
         reason = parsed.get('error', parsed.get('explanation', 'LLM could not translate'))
+        # Overwrite the ROUTING skip_reason with the TERMINAL verdict. The fast path
+        # sets "routed to LLM (fast-path dropped a DAX component)" to mean "hand this
+        # to the LLM"; leaving that text in place once the LLM has ALSO declined
+        # reports an intermediate state as the final one, so the Not-transpiled panel
+        # and the re-evaluation sweep both claim the LLM never got a turn.
+        measure.skip_reason = _llm_declined_reason(measure.dax_class, reason)
         logger.info(f"[DAX_LLM] Could not translate {measure.original_name} (dax_class={measure.dax_class}): {reason}")
 
     return measure
+
+
+def _llm_declined_reason(dax_class: str | None, detail: str) -> str:
+    """Human-readable terminal skip_reason for a measure the LLM declined.
+
+    Names the LLM as the decider and why, so a reviewer can tell "the LLM judged this
+    unsupported" apart from "nobody has looked at it yet".
+    """
+    label = {
+        'unsupported': 'no UC metric-view equivalent',
+        'display_layer': 'display/formatting only — not a data measure',
+        'out_of_scope': 'out of scope for a metric view',
+        'architecture_change': 'needs a source-model change (not expressible as-is)',
+        'composed': 'depends on other measures that must be defined first',
+    }.get((dax_class or '').strip(), '')
+    detail = (detail or '').strip().rstrip('.')
+    parts = [p for p in (label, detail) if p]
+    suffix = f" — {'; '.join(parts)}" if parts else ''
+    cls = f" [{dax_class}]" if dax_class else ''
+    return f"LLM declined{cls}{suffix}"
 
 
 # Max concurrent LLM translations per chunk. Bounded so we get a large
