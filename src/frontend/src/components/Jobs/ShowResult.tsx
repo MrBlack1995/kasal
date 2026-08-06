@@ -48,6 +48,7 @@ import { ResultValue } from '../../types/result';
 import { DatabricksService } from '../../api/DatabricksService';
 import UCMVResultViewer, { isUCMVResult, UCMVResult } from './UCMVResultViewer';
 import ValidatorResultViewer, { isValidatorResult } from './ValidatorResultViewer';
+import ReevaluationResultViewer, { isReevaluationResult } from './ReevaluationResultViewer';
 import { runService } from '../../api/ExecutionHistoryService';
 
 // eslint-disable-next-line react/prop-types
@@ -749,6 +750,9 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
             if (isValidatorResult(inner)) {
               return <ValidatorResultViewer result={inner as Parameters<typeof ValidatorResultViewer>[0]['result']} />;
             }
+            if (isReevaluationResult(inner)) {
+              return <ReevaluationResultViewer result={inner as Parameters<typeof ReevaluationResultViewer>[0]['result']} />;
+            }
           }
         } catch { /* not JSON */ }
       }
@@ -761,6 +765,11 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
       // UCMV Quality Validator result: green/amber/red quality report
       if (isValidatorResult(parsed)) {
         return <ValidatorResultViewer result={parsed as Parameters<typeof ValidatorResultViewer>[0]['result']} />;
+      }
+
+      // UCMV Re-evaluation sweep: measures today's transpiler can now recover
+      if (isReevaluationResult(parsed)) {
+        return <ReevaluationResultViewer result={parsed as Parameters<typeof ReevaluationResultViewer>[0]['result']} />;
       }
 
       // If there's only one key called 'Value', render its content directly
@@ -808,6 +817,9 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
                   }
                   if (isUCMVResult(innerParsed)) {
                     return <UCMVResultViewer result={innerParsed as Parameters<typeof UCMVResultViewer>[0]['result']} />;
+                  }
+                  if (isReevaluationResult(innerParsed)) {
+                    return <ReevaluationResultViewer result={innerParsed as Parameters<typeof ReevaluationResultViewer>[0]['result']} />;
                   }
                 } catch { /* not JSON, fall through */ }
               }

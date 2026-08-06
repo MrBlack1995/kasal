@@ -471,6 +471,7 @@ class UCMetricViewGeneratorTool(BaseTool):
                 dataset_id=_get('dataset_id'),
                 catalog=catalog,
                 schema=schema,
+                untranslatable_items=output.get('untranslatable_items') or [],
             ))
         except Exception as _hist_err:
             logger.warning(f"[UCMVGenerator] conversion_history persistence skipped: {_hist_err}")
@@ -791,6 +792,7 @@ class UCMetricViewGeneratorTool(BaseTool):
         dataset_id: Optional[str],
         catalog: Optional[str],
         schema: Optional[str],
+        untranslatable_items: Optional[list] = None,
     ) -> None:
         """Persist the full raw DAX extract to conversion_history (fail-open).
 
@@ -800,7 +802,23 @@ class UCMetricViewGeneratorTool(BaseTool):
         ``source_format=powerbi_dax`` / ``execution_id``) or
         ``GET /conversion-history/{id}``. Any failure here is non-fatal — it must
         never break the generation itself.
+
+        Also records the non-transpiled measures plus the transpiler's CAPABILITY
+        FINGERPRINT. That pair is what makes re-evaluation possible: a later sweep
+        can ask "has the transpiler changed since this run, and which measures did
+        it fail on?" without re-hitting the PowerBI API. See
+        src/docs/powerbi/ucmv-reevaluation-recoverable-measures.md.
         """
+        def _capability_fp() -> str:
+            """Current transpiler capability fingerprint (fail-open)."""
+            try:
+                from src.engines.crewai.tools.custom.metric_view_utils.capability_version import (
+                    capability_fingerprint,
+                )
+                return capability_fingerprint()
+            except Exception:
+                return "unknown"
+
         try:
             from src.engines.crewai.tools.tool_session_provider import ToolSessionProvider
             from src.schemas.conversion import ConversionHistoryCreate
@@ -832,6 +850,9 @@ class UCMetricViewGeneratorTool(BaseTool):
                     "sql": sql_output,
                     "catalog": catalog,
                     "schema": schema,
+                    # Re-evaluation inputs: WHICH measures failed, and at WHAT
+                    # capability level. A later sweep re-tries only these.
+                    "untranslatable_items": untranslatable_items or [],
                 },
                 output_summary=(
                     f"Generated {view_count} UC metric view(s)"
@@ -842,6 +863,10 @@ class UCMetricViewGeneratorTool(BaseTool):
                     "dataset_id": dataset_id,
                     "catalog": catalog,
                     "schema": schema,
+                    # Capability level that produced this result. Re-evaluation
+                    # compares it against the current fingerprint to decide whether a
+                    # retry can possibly gain anything.
+                    "capability_fingerprint": _capability_fp(),
                 },
                 status="success",
                 measure_count=measure_count,

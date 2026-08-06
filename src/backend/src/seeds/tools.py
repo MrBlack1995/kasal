@@ -48,6 +48,7 @@ tools_data = [
     (93, "UCMV Genie Space Config Generator", "Auto-generates Genie Space configuration from deployed UC Metric Views. Reads ucmv_output (auto-injected from flow) and uses an LLM to produce: text_instructions (business description), sample_questions (natural language questions), example_sqls_json (MEASURE() SQL queries), and join_specs_json (from UCMV join definitions). If genie_config_override is provided (manually uploaded JSON), the LLM step is skipped. Output fields match the Genie Space Generator schema for direct flow injection. Use as the step between Metric View Deployer and Genie Space Generator.", "transform"),
     (94, "PBI Visual-UCMV Mapper", "Maps Power BI report visuals to deployed UC Metric View metric views. Takes Power BI Report References (tool 78) output and ucmv_output (from flow injection) and uses an LLM to match each visual's PBI measures to UCMV SQL measures, identify the correct metric view, determine grouping dimensions, and generate executable Databricks SQL with MEASURE() syntax. Output feeds directly into the Dashboard Creator (tool 95). Part of the CI/CD dashboard pipeline: Report References → UCMV Mapper → Dashboard Creator.", "transform"),
     (95, "Databricks Dashboard Creator", "Creates Databricks AI/BI (Lakeview) dashboards from visual-to-UCMV mappings. Takes the structured visual mappings from the PBI Visual-UCMV Mapper (tool 94), generates a Lakeview dashboard JSON with correct widget types (bar, line, table, counter), datasets with MEASURE() SQL queries, and page layouts. Calls the Databricks Lakeview REST API to create or update the dashboard and optionally publishes it. Returns the dashboard URL. Final step in the CI/CD dashboard pipeline.", "database"),
+    (97, "UCMV Re-evaluation", "Finds previously-untranslatable DAX measures that TODAY's improved transpiler can now recover. Replays stored conversion history (no PowerBI API call): for each dataset it compares the capability fingerprint of the original run against the current one, and re-tries ONLY the measures that failed back then. Reports which are now recoverable with their new SQL, the reason they failed before, and how many other measures depend on them. Read-only — proposes re-transpilation candidates, never modifies metric views. Deterministic by default (no LLM tokens); set use_llm=true to also try the LLM-first path. Skips permanent-limitation categories (display artifacts, slicer scalars, prior-year) and measures a reviewer already dismissed. Schedule it or trigger manually after shipping transpiler improvements.", "database"),
 ]
 
 def get_tool_configs():
@@ -480,7 +481,9 @@ async def seed_async():
     tools_error = 0
 
     # List of tool IDs that should be enabled
-    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 67, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 80, 81, 82, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+    # 97 = UCMV Re-evaluation: the seeded "UCMV Re-evaluation" crew references it, so
+    # it must be enabled or that crew's task cannot resolve its tool.
+    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 67, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 80, 81, 82, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 97]
 
     for tool_id, title, description, icon in tools_data:
         try:
@@ -543,7 +546,9 @@ def seed_sync():
     tools_error = 0
 
     # List of tool IDs that should be enabled
-    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 67, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 80, 81, 82, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+    # 97 = UCMV Re-evaluation: the seeded "UCMV Re-evaluation" crew references it, so
+    # it must be enabled or that crew's task cannot resolve its tool.
+    enabled_tool_ids = [6, 16, 26, 31, 35, 36, 67, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 80, 81, 82, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 97]
 
     for tool_id, title, description, icon in tools_data:
         try:
