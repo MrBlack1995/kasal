@@ -127,6 +127,46 @@ else:
     _SYSTEM_PROMPT = _FALLBACK_INSTRUCTIONS + "\n" + _OUTPUT_CONTRACT
 
 
+# Batch output contract: the model is handed SEVERAL measures in one call (so the
+# ~14k-token skill corpus is sent ONCE and amortised across the whole batch,
+# instead of re-sent per measure — Databricks silently drops Anthropic prompt
+# caching, so per-measure calls pay the full corpus every time). It must return a
+# JSON ARRAY, one object per measure, echoing the measure name so results map back.
+_BATCH_OUTPUT_CONTRACT = """
+
+You are given SEVERAL DAX measures in one request. Respond with a SINGLE valid
+JSON ARRAY (no markdown code fences), containing exactly one object per measure
+you were given:
+[
+  {
+    "measure_name": "<echo the EXACT measure name you were given>",
+    "success": true or false,
+    "sql_expr": "the Spark SQL expression" or null,
+    "dax_class": "translatable_direct|composed|filtered|architecture_change|display_layer|unsupported|out_of_scope",
+    "confidence": "high" or "medium" or "low",
+    "explanation": "brief explanation of the translation",
+    "error": "reason if success=false" or null
+  }
+]
+Include EVERY measure exactly once. Do not merge, skip, or invent measures.
+Classify each into exactly one dax_class (same definitions as above)."""
+
+# Corpus-backed batch system prompt (corpus sent ONCE per batch call).
+if _SKILL_CORPUS:
+    _SYSTEM_PROMPT_BATCH = (
+        "You are an expert Power BI DAX → Databricks UC Metric View translator. "
+        "Use the following skill corpus (engineering's DAX-translation decision "
+        "framework + UC-metric-view target-language spec) as your authoritative "
+        "guide for WHAT to translate and HOW to write the target YAML/SQL.\n\n"
+        f"{_SKILL_CORPUS}\n\n"
+        "----\n"
+        "Translate EACH of the given DAX measures to a Spark SQL expression for a "
+        "UC Metric View, following the corpus above." + _BATCH_OUTPUT_CONTRACT
+    )
+else:
+    _SYSTEM_PROMPT_BATCH = _FALLBACK_INSTRUCTIONS + "\n" + _BATCH_OUTPUT_CONTRACT
+
+
 def _content_hash(text: str) -> str:
     """SHA-256 hash for cache key."""
     return hashlib.sha256(text.encode()).hexdigest()[:16]
@@ -182,6 +222,75 @@ def _parse_response(response_text: str) -> dict:
         return {'success': False, 'error': 'Failed to parse LLM response'}
 
 
+def _strip_code_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith('```json'):
+        return text.split('```json')[1].split('```')[0].strip()
+    if text.startswith('```'):
+        return text.split('```')[1].split('```')[0].strip()
+    return text
+
+
+def _build_batch_user_prompt(
+    measures: list[TranslationResult],
+    base_names: set[str],
+    table_context: str = "",
+) -> str:
+    """Build ONE user prompt covering all measures in a batch.
+
+    The fact-table context (source table, columns, joins, filters) is included
+    ONCE for the whole batch — every measure in a ``translate_batch_with_llm``
+    call belongs to the same table_key, so they share it. This is what makes
+    batching cheap: the big shared context and the corpus system prefix are sent
+    once, not once per measure.
+    """
+    available_measures = ', '.join(sorted(base_names)[:50])
+    ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
+    lines = []
+    for i, m in enumerate(measures, start=1):
+        lines.append(f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}")
+    measures_block = "\n".join(lines)
+    return f"""Translate the following {len(measures)} DAX measures to Spark SQL for a UC Metric View, using the shared fact-table context below.
+{ctx_block}
+## Available MEASURE() references (already translated)
+{available_measures}
+
+## Measures to translate
+{measures_block}
+
+## Instructions
+- Use ONLY the source columns / join aliases listed in the fact table context above; do not invent column names.
+- If referencing another measure, use MEASURE(snake_case_name)
+- Column references: source.column_name (fact) or alias.column_name (joined dimension)
+- Return a JSON ARRAY with one object per measure, echoing "measure_name" exactly as given."""
+
+
+def _parse_batch_response(response_text: str) -> list[dict] | None:
+    """Parse a batch response into a list of per-measure result dicts.
+
+    Accepts a bare JSON array, a ``{"measures": [...]}`` wrapper, or an object
+    keyed by measure name. Returns ``None`` if nothing usable parses, which the
+    caller treats as a signal to fall back to per-measure translation.
+    """
+    try:
+        data = json.loads(_strip_code_fences(response_text))
+    except (json.JSONDecodeError, IndexError):
+        return None
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        if isinstance(data.get('measures'), list):
+            return [d for d in data['measures'] if isinstance(d, dict)]
+        # Object keyed by measure name → normalise to a list.
+        out = []
+        for key, val in data.items():
+            if isinstance(val, dict):
+                val.setdefault('measure_name', key)
+                out.append(val)
+        return out or None
+    return None
+
+
 def _validate_sql(sql_expr: str) -> bool:
     """Check that the LLM output doesn't contain DAX-only constructs."""
     _DAX_ONLY = re.compile(
@@ -191,6 +300,43 @@ def _validate_sql(sql_expr: str) -> bool:
         re.IGNORECASE,
     )
     return not _DAX_ONLY.search(sql_expr)
+
+
+def _apply_parsed(measure: TranslationResult, parsed: dict, usage: dict | None = None) -> None:
+    """Apply a parsed LLM result dict to a measure in place (success or decline).
+
+    Shared by the single-measure and batch paths so both interpret the LLM's
+    JSON identically. On success the measure is marked translatable; on decline
+    (or SQL that still contains DAX-only constructs) the measure is left
+    untranslated (fail-open) with a terminal ``skip_reason``.
+    """
+    if parsed.get('success') and parsed.get('sql_expr'):
+        sql_expr = parsed['sql_expr']
+        # Validate: no DAX-only constructs leaked into the output.
+        if not _validate_sql(sql_expr):
+            logger.warning(f"[DAX_LLM] LLM output contains DAX constructs for {measure.original_name}")
+            return
+        measure.sql_expr = sql_expr
+        measure.is_translatable = True
+        measure.confidence = parsed.get('confidence', 'medium')
+        measure.category = 'llm_translated'
+        # dax_class = translation provenance/quality (7-cat); NOT emission routing.
+        measure.dax_class = parsed.get('dax_class')
+        measure.skip_reason = ''
+        usage = usage or {}
+        tokens = usage.get('total_tokens', 0)
+        cache_read = usage.get('cache_read_input_tokens', 0)
+        logger.info(
+            f"[DAX_LLM] Translated {measure.original_name} → {sql_expr[:80]}... "
+            f"(confidence={measure.confidence}, dax_class={measure.dax_class}, "
+            f"tokens={tokens}, cache_read={cache_read})"
+        )
+    else:
+        # Even on non-success, record the classification for reporting/telemetry.
+        measure.dax_class = parsed.get('dax_class') or measure.dax_class
+        reason = parsed.get('error', parsed.get('explanation', 'LLM could not translate'))
+        measure.skip_reason = _llm_declined_reason(measure.dax_class, reason)
+        logger.info(f"[DAX_LLM] Could not translate {measure.original_name} (dax_class={measure.dax_class}): {reason}")
 
 
 def _system_message(system_prompt: str) -> dict:
@@ -220,6 +366,7 @@ async def _call_llm(
     prompt: str,
     system_prompt: str,
     model: str,
+    max_tokens: int = 2000,
 ) -> dict:
     """Call the LLM, preferring the cache-aware usage-returning path.
 
@@ -227,6 +374,9 @@ async def _call_llm(
     can carry ``cache_control`` and the ``usage`` block is returned (cache hits
     observable). Falls back to plain ``completion()`` if the cached path errors,
     so a transport hiccup never blocks translation (fail-open).
+
+    ``max_tokens`` is raised by the batch path, which asks the model to translate
+    many measures in one response (see ``translate_batch_with_llm``).
     """
     from src.core.llm_manager import LLMManager
     from src.utils.telemetry import get_user_agent_header, KasalProduct
@@ -238,7 +388,7 @@ async def _call_llm(
             messages=messages,
             model=model,
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=max_tokens,
             extra_headers=headers,
         )
         return {"content": result.get("content"), "usage": result.get("usage", {})}
@@ -252,7 +402,7 @@ async def _call_llm(
                 ],
                 model=model,
                 temperature=0.1,
-                max_tokens=2000,
+                max_tokens=max_tokens,
                 extra_headers=headers,
             )
             return {"content": content, "usage": {}}
@@ -330,41 +480,11 @@ async def translate_with_llm(
         _cache.popitem(last=False)
     _cache[cache_key] = parsed
 
-    if parsed.get('success') and parsed.get('sql_expr'):
-        sql_expr = parsed['sql_expr']
-
-        # Validate: no DAX-only constructs in output
-        if not _validate_sql(sql_expr):
-            logger.warning(f"[DAX_LLM] LLM output contains DAX constructs for {measure.original_name}")
-            return measure
-
-        measure.sql_expr = sql_expr
-        measure.is_translatable = True
-        measure.confidence = parsed.get('confidence', 'medium')
-        measure.category = 'llm_translated'
-        # dax_class = translation provenance/quality (7-cat); NOT emission routing.
-        measure.dax_class = parsed.get('dax_class')
-        measure.skip_reason = ''
-
-        usage = response.get('usage', {}) or {}
-        tokens = usage.get('total_tokens', 0)
-        cache_read = usage.get('cache_read_input_tokens', 0)
-        logger.info(
-            f"[DAX_LLM] Translated {measure.original_name} → {sql_expr[:80]}... "
-            f"(confidence={measure.confidence}, dax_class={measure.dax_class}, "
-            f"tokens={tokens}, cache_read={cache_read})"
-        )
-    else:
-        # Even on non-success, record the classification for reporting/telemetry.
-        measure.dax_class = parsed.get('dax_class') or measure.dax_class
-        reason = parsed.get('error', parsed.get('explanation', 'LLM could not translate'))
-        # Overwrite the ROUTING skip_reason with the TERMINAL verdict. The fast path
-        # sets "routed to LLM (fast-path dropped a DAX component)" to mean "hand this
-        # to the LLM"; leaving that text in place once the LLM has ALSO declined
-        # reports an intermediate state as the final one, so the Not-transpiled panel
-        # and the re-evaluation sweep both claim the LLM never got a turn.
-        measure.skip_reason = _llm_declined_reason(measure.dax_class, reason)
-        logger.info(f"[DAX_LLM] Could not translate {measure.original_name} (dax_class={measure.dax_class}): {reason}")
+    # Apply the parsed result (success marks translatable; decline sets a terminal
+    # skip_reason — overwriting the fast-path's "routed to LLM" routing text so the
+    # Not-transpiled panel / re-evaluation sweep don't report an intermediate state
+    # as final).
+    _apply_parsed(measure, parsed, response.get('usage', {}) or {})
 
     return measure
 
@@ -397,6 +517,15 @@ def _llm_declined_reason(dax_class: str | None, detail: str) -> str:
 # resolves references to measures translated in an earlier chunk — preserving
 # most of the cross-measure reference benefit of the old sequential order.
 _DAX_LLM_CONCURRENCY = 6
+
+# Number of measures translated per LLM call. The skill-corpus system prefix
+# (~14k tokens) and the shared fact-table context are sent ONCE per call, so a
+# batch of N amortises them across N measures instead of paying them per measure
+# — the single biggest lever on the workspace tokens-per-minute rate limit, since
+# Databricks silently drops Anthropic prompt caching (every call is cache_read=0).
+# Tunable via env for field tuning without a redeploy. Keep modest so one call's
+# input+output stays well within context/output limits.
+_DAX_LLM_BATCH_SIZE = max(1, int(os.getenv("DAX_LLM_BATCH_SIZE", "12")))
 
 
 async def translate_batch_with_llm(
@@ -464,30 +593,92 @@ async def translate_batch_with_llm(
 
     logger.info(
         f"[DAX_LLM] Attempting LLM fallback for {len(candidates)} measures in "
-        f"{table_key} (concurrency={_DAX_LLM_CONCURRENCY})"
+        f"{table_key} (batch_size={_DAX_LLM_BATCH_SIZE})"
     )
 
-    # Run-scoped cache — prevents cross-tenant leakage between pipeline runs.
-    # Shared across chunks so identical DAX only hits the LLM once.
+    # Run-scoped cache — prevents cross-tenant leakage between pipeline runs and
+    # lets identical DAX (same table_context) reuse an earlier result in this run.
     run_cache: OrderedDict[str, dict] = OrderedDict()
 
+    def _ck(m: TranslationResult) -> str:
+        return _content_hash(m.dax_expression + "\x00" + table_context)
+
     translated_count = 0
-    for start in range(0, len(candidates), _DAX_LLM_CONCURRENCY):
-        chunk = candidates[start:start + _DAX_LLM_CONCURRENCY]
-        # Snapshot the reference context so all measures in this chunk see the
-        # same (already-translated) refs — matches deterministic behaviour and
-        # avoids mutating shared dicts concurrently.
+    # Process in BATCHES: one LLM call per batch translates all its measures, so
+    # the ~14k-token skill corpus + shared fact-table context are paid ONCE per
+    # batch instead of per measure (~batch_size× fewer input tokens — what was
+    # blowing the workspace tokens-per-minute limit). Batches run sequentially:
+    # dependencies are ordered into earlier batches (topo_priority) and each
+    # batch's successes merge into base_names before the next, so cross-measure
+    # MEASURE() references still resolve, and the per-minute token burst stays low.
+    for start in range(0, len(candidates), _DAX_LLM_BATCH_SIZE):
+        batch = candidates[start:start + _DAX_LLM_BATCH_SIZE]
         snap_names = set(base_names)
-        snap_map = dict(original_to_snake)
-        await asyncio.gather(*(
-            translate_with_llm(
-                m, table_key, snap_names, snap_map,
-                model=model, cache=run_cache, table_context=table_context,
+
+        # Apply run-cache hits first; only the rest need an LLM call.
+        need_llm: list[TranslationResult] = []
+        for m in batch:
+            cached = run_cache.get(_ck(m))
+            if cached is not None:
+                _apply_parsed(m, cached)
+            else:
+                need_llm.append(m)
+
+        if need_llm:
+            prompt = _build_batch_user_prompt(need_llm, snap_names, table_context)
+            # Budget output for the whole batch (each measure ~a few hundred tokens).
+            batch_max_tokens = min(len(need_llm) * 400 + 800, 16000)
+            response = await _call_llm(
+                prompt, _SYSTEM_PROMPT_BATCH, model, max_tokens=batch_max_tokens
             )
-            for m in chunk
-        ))
-        # Merge this chunk's successes into the shared context for later chunks.
-        for m in chunk:
+            parsed_list = _parse_batch_response(response.get('content') or '')
+
+            if parsed_list is None:
+                # Whole batch unparseable → per-measure fallback so one malformed
+                # response never loses a whole batch of measures.
+                logger.warning(
+                    f"[DAX_LLM] batch response unparseable for {table_key}; "
+                    f"falling back to per-measure for {len(need_llm)} measure(s)"
+                )
+                await asyncio.gather(*(
+                    translate_with_llm(
+                        m, table_key, snap_names, dict(original_to_snake),
+                        model=model, cache=run_cache, table_context=table_context,
+                    )
+                    for m in need_llm
+                ))
+            else:
+                by_name = {}
+                for item in parsed_list:
+                    nm = str(item.get('measure_name', '')).strip().lower()
+                    if nm:
+                        by_name[nm] = item
+                missing: list[TranslationResult] = []
+                for m in need_llm:
+                    item = by_name.get(m.original_name.strip().lower())
+                    if item is None:
+                        missing.append(m)
+                        continue
+                    if len(run_cache) >= _RUN_CACHE_MAX:
+                        run_cache.popitem(last=False)
+                    run_cache[_ck(m)] = item
+                    _apply_parsed(m, item, response.get('usage', {}) or {})
+                # Any measure the model dropped from the array → per-measure retry.
+                if missing:
+                    logger.warning(
+                        f"[DAX_LLM] {len(missing)} measure(s) missing from batch "
+                        f"response in {table_key}; per-measure fallback"
+                    )
+                    await asyncio.gather(*(
+                        translate_with_llm(
+                            m, table_key, snap_names, dict(original_to_snake),
+                            model=model, cache=run_cache, table_context=table_context,
+                        )
+                        for m in missing
+                    ))
+
+        # Merge this batch's successes into the shared context for later batches.
+        for m in batch:
             if m.is_translatable:
                 translated_count += 1
                 base_names.add(m.measure_name)

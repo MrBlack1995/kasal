@@ -1,5 +1,6 @@
 """Tests for DAX LLM fallback module."""
 import json
+import re
 import pytest
 from collections import OrderedDict
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -12,6 +13,19 @@ from src.engines.crewai.tools.custom.metric_view_utils.dax_llm_fallback import (
     translate_batch_with_llm,
 )
 from src.engines.crewai.tools.custom.metric_view_utils.data_classes import TranslationResult
+
+
+def _batch_reply(prompt, sql="SUM(source.c)", **fields):
+    """Build a fake batch LLM reply that echoes every measure in the batch prompt.
+
+    The batch path sends all measures in one call and expects a JSON ARRAY back,
+    one object per measure keyed by ``measure_name``. This parses the numbered
+    ``N. name: <original_name>`` lines from the batch user prompt and returns a
+    success object for each, so a single mock works for any batch composition.
+    """
+    names = re.findall(r"(?m)^\s*\d+\. name: (.+)$", prompt)
+    arr = [{"measure_name": n.strip(), "success": True, "sql_expr": sql, **fields} for n in names]
+    return {"content": json.dumps(arr), "usage": {}}
 
 
 class TestHelpers:
@@ -209,27 +223,29 @@ class TestTranslateBatchWithLLM:
         ]
         seen = []
 
-        async def fake_call(prompt, sysp, model):
+        async def fake_call(prompt, sysp, model, max_tokens=None):
             seen.append(prompt)
-            return {"content": json.dumps({"success": True, "sql_expr": "SUM(source.amount)",
-                                           "confidence": "medium"}), "usage": {}}
+            return _batch_reply(prompt, sql="SUM(source.amount)", confidence="medium")
 
         with patch("src.engines.crewai.tools.custom.metric_view_utils.dax_llm_fallback._call_llm",
                    new=fake_call):
             result = await translate_batch_with_llm(measures, "fact_test", set(), {})
 
-        # Both SELECTEDVALUE measures were sent to the LLM (not artifact-filtered)
-        # and got translated.
-        assert len(seen) == 2
+        # Both SELECTEDVALUE measures reached the LLM (not artifact-filtered) — now
+        # in a single batch call — and got translated.
+        assert len(seen) == 1
+        assert "F_Start_date" in seen[0] and "Guarded" in seen[0]
         assert all(m.is_translatable for m in result)
 
 
 class TestBatchConcurrency:
-    """translate_batch_with_llm runs in bounded-concurrency chunks (not one-at-a-time).
+    """translate_batch_with_llm sends many measures per LLM call (batching).
 
-    Regression: the old sequential loop could exceed the flow's crew timeout on
-    models with hundreds of measures. Chunked concurrency cuts wall-time while
-    preserving cross-measure MEASURE() reference resolution between chunks.
+    Regression: per-measure calls re-sent the ~14k-token skill corpus every time
+    (Databricks drops prompt caching), blowing the workspace tokens-per-minute
+    limit. Batching amortises the corpus across the batch; batches run
+    sequentially, merging translations between them so cross-measure MEASURE()
+    references still resolve.
     """
 
     def _mk(self, i):
@@ -239,14 +255,16 @@ class TestBatchConcurrency:
             skip_reason="", confidence="", category="",
         )
 
-    def test_all_translated_and_runs_concurrently(self):
+    def test_all_translated_in_batches(self):
         import asyncio, time
         from src.engines.crewai.tools.custom.metric_view_utils import dax_llm_fallback as d
-        measures = [self._mk(i) for i in range(14)]  # 3 chunks at concurrency=6
+        measures = [self._mk(i) for i in range(14)]  # 2 batches at batch_size=12
+        calls = []
 
-        async def fake_call(prompt, sys, model):
+        async def fake_call(prompt, sys, model, max_tokens=None):
+            calls.append(prompt)
             await asyncio.sleep(0.05)
-            return {'content': json.dumps({"success": True, "sql_expr": "SUM(source.c)", "confidence": "high"})}
+            return _batch_reply(prompt, sql="SUM(source.c)", confidence="high")
 
         async def go():
             with patch.object(d, "_call_llm", new=fake_call):
@@ -256,8 +274,10 @@ class TestBatchConcurrency:
 
         out, dur = asyncio.run(go())
         assert sum(1 for m in out if m.is_translatable) == 14
-        # Sequential would be ~14*0.05=0.70s; chunked(6) is ~3*0.05=0.15s.
-        assert dur < 0.45, f"expected concurrent execution, got {dur:.2f}s"
+        # 14 measures at batch_size=12 → 2 LLM calls, not 14 (the token-burn win).
+        assert len(calls) == 2
+        # 2 sequential batch calls ≈ 2*0.05=0.10s — well under the crew timeout.
+        assert dur < 0.45, f"expected batched execution, got {dur:.2f}s"
 
     def test_artifacts_skipped(self):
         import asyncio
@@ -266,7 +286,7 @@ class TestBatchConcurrency:
         m.skip_reason = "FORMAT string artifact"
         called = False
 
-        async def fake_call(*a):
+        async def fake_call(*a, **kw):
             nonlocal called; called = True
             return {'content': '{"success": true, "sql_expr": "x"}'}
 
@@ -276,6 +296,57 @@ class TestBatchConcurrency:
 
         asyncio.run(go())
         assert called is False  # artifact never sent to the LLM
+
+
+class TestBatchRobustness:
+    """A malformed/incomplete batch response must never silently drop measures."""
+
+    def _mk(self, i):
+        return TranslationResult(
+            original_name=f"M{i}", measure_name=f"m{i}",
+            dax_expression=f"SUM(t[c{i}])", sql_expr="", is_translatable=False,
+            skip_reason="", confidence="", category="",
+        )
+
+    def test_unparseable_batch_falls_back_to_per_measure(self):
+        import asyncio
+        from src.engines.crewai.tools.custom.metric_view_utils import dax_llm_fallback as d
+        measures = [self._mk(i) for i in range(3)]
+
+        async def fake_call(prompt, sysp, model, max_tokens=None):
+            if "Translate the following" in prompt:      # the batch call
+                return {"content": "sorry, not JSON", "usage": {}}
+            # per-measure fallback call
+            return {"content": json.dumps({"success": True, "sql_expr": "SUM(source.c)"}), "usage": {}}
+
+        async def go():
+            with patch.object(d, "_call_llm", new=fake_call):
+                return await d.translate_batch_with_llm(measures, "tbl", set(), {}, model="m")
+
+        out = asyncio.run(go())
+        # Batch parse failed, but every measure still translated via the fallback.
+        assert all(m.is_translatable for m in out)
+
+    def test_measure_missing_from_batch_gets_per_measure_retry(self):
+        import asyncio
+        from src.engines.crewai.tools.custom.metric_view_utils import dax_llm_fallback as d
+        measures = [self._mk(0), self._mk(1)]
+
+        async def fake_call(prompt, sysp, model, max_tokens=None):
+            if "Translate the following" in prompt:      # batch: only answer M0
+                return {"content": json.dumps([
+                    {"measure_name": "M0", "success": True, "sql_expr": "SUM(source.c0)"}
+                ]), "usage": {}}
+            # per-measure fallback for the dropped M1
+            return {"content": json.dumps({"success": True, "sql_expr": "SUM(source.c1)"}), "usage": {}}
+
+        async def go():
+            with patch.object(d, "_call_llm", new=fake_call):
+                return await d.translate_batch_with_llm(measures, "tbl", set(), {}, model="m")
+
+        out = asyncio.run(go())
+        # M0 from the batch, M1 recovered by the per-measure retry.
+        assert all(m.is_translatable for m in out)
 
 
 class TestLLMFirstCorpus:
@@ -320,12 +391,12 @@ class TestLLMFirstCorpus:
                                    sql_expr='', is_translatable=False, skip_reason='', confidence='', category='')
         child = TranslationResult(original_name='Child', measure_name='child', dax_expression='[Parent]*2',
                                   sql_expr='', is_translatable=False, skip_reason='', confidence='', category='')
-        seen_order = []
+        captured = {}
 
-        async def fake_call(prompt, sysp, model):
-            # record which measure ran (prompt carries the name)
-            seen_order.append('Parent' if 'Parent' in prompt and 'Child' not in prompt else 'Child')
-            return {"content": json.dumps({"success": True, "sql_expr": "SUM(source.a)", "dax_class": "translatable_direct"}), "usage": {}}
+        async def fake_call(prompt, sysp, model, max_tokens=None):
+            # parent + child land in one batch; capture the prompt to check order.
+            captured['prompt'] = prompt
+            return _batch_reply(prompt, sql="SUM(source.a)", dax_class="translatable_direct")
 
         async def go():
             with patch.object(d, "_call_llm", new=fake_call):
@@ -333,8 +404,10 @@ class TestLLMFirstCorpus:
                 await d.translate_batch_with_llm([child, parent], "t", set(), {}, model="x",
                                                  topo_priority={'Parent': 0, 'Child': 1})
         asyncio.run(go())
-        # parent must be attempted before child
-        assert seen_order.index('Parent') < seen_order.index('Child')
+        # topo_priority orders parent before child WITHIN the batch prompt, so the
+        # child's MEASURE(parent) reference resolves against an earlier line.
+        p = captured['prompt']
+        assert p.index('Parent') < p.index('Child')
 
 
 class TestTableContext:
