@@ -29,7 +29,7 @@ class Builder:
             
             # Install dependencies
             logger.info("Installing npm dependencies...")
-            subprocess.run(["npm", "install"], check=True)
+            subprocess.run(["npm", "ci"], check=True)
             
             # Copy documentation markdown files to frontend public folder before building
             frontend_public_docs = self.frontend_dir / "public" / "docs"

@@ -313,10 +313,7 @@ async def lifespan(app: FastAPI):
                 # destructive DROP SCHEMA the migrate UI would do. Best-effort.
                 try:
                     from src.db.session import run_schema_self_heal
-                    async with lb_factory._session_factory() as _heal_session:
-                        conn = await _heal_session.connection()
-                        await run_schema_self_heal(conn)
-                        await _heal_session.commit()
+                    await run_schema_self_heal(lb_factory._engine)
                     system_logger.info("Lakebase schema self-heal complete")
                 except Exception as _heal_err:
                     system_logger.warning(

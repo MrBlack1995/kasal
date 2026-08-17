@@ -308,6 +308,12 @@ UCMV_GEN_TASK = {
             "tenant_id": "",
             "client_id": "",
             "client_secret": "",
+            # Distinct admin Service Principal for the MQuery Admin Scanner's
+            # 3rd fallback tier (retries the scan itself with admin rights when
+            # client_id/client_secret and Fabric TMDL both fail) — mirrors
+            # Pipeline Config Generator's admin_client_id/admin_client_secret.
+            "admin_client_id": "",
+            "admin_client_secret": "",
             "catalog": "",
             "schema_name": "",
             "use_llm_fallback": True,

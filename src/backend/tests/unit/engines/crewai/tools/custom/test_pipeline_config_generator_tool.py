@@ -892,6 +892,93 @@ class TestUCMVHandoffPayload:
         # UCMV pipeline iterates mapping expecting these keys
         assert set(out[0]) >= {"measure_name", "dax_expression", "proposed_allocation"}
 
+    def test_build_ucmv_mquery_resolves_catalog_nav_to_compact_sql(self):
+        """A Databricks.Catalogs (click-together, no embedded SQL) table gets
+        compiled to compact SQL instead of shipping the raw M — this is the
+        actual fix for the reported "0 views generated" bug: raw M for this
+        connector shape carries no FROM clause the downstream parser can read."""
+        admin_tables = {
+            "dim_Rules": {
+                "mquery_expression": (
+                    'let Source = Databricks.Catalogs("h","p"){[Name="cat"]}[Data]'
+                    '{[Name="sch"]}[Data]{[Name="tbl"]}[Data] in Source'
+                ),
+                "measures": [],
+            },
+        }
+        out = PipelineConfigGeneratorTool._build_ucmv_mquery(admin_tables)
+        entry = next(e for e in out if e["table_name"] == "dim_Rules")
+        assert entry["transpiled_sql"] == "SELECT * FROM cat.sch.tbl"
+
+    def test_build_ucmv_mquery_follows_reference_via_expressions(self):
+        """A table that's nothing but a passthrough to a disabled staging
+        query only resolves with the model's shared `expressions` supplied."""
+        admin_tables = {
+            "DCC Vendor Universe": {
+                "mquery_expression": 'let Source = #"f_vendor_universe - DataBricks SQL" in Source',
+                "measures": [],
+            },
+        }
+        expressions = {
+            "f_vendor_universe - DataBricks SQL": (
+                'let Source = Databricks.Catalogs("h","p"){[Name="cat"]}[Data]'
+                '{[Name="sch"]}[Data]{[Name="tbl"]}[Data] in Source'
+            ),
+        }
+        # Without expressions: unresolved, but small enough to ship as-is.
+        out_no_ctx = PipelineConfigGeneratorTool._build_ucmv_mquery(admin_tables)
+        assert out_no_ctx[0]["transpiled_sql"] == admin_tables["DCC Vendor Universe"]["mquery_expression"]
+        # With expressions: resolved to the referenced query's compact SQL.
+        out_ctx = PipelineConfigGeneratorTool._build_ucmv_mquery(admin_tables, expressions)
+        assert out_ctx[0]["transpiled_sql"] == "SELECT * FROM cat.sch.tbl"
+
+    def test_build_ucmv_mquery_caps_large_unresolved_raw_m(self):
+        """A table that's extractable-looking but unresolvable, and too large
+        to ship in full, is capped — not omitted (still reported) and not
+        shipped whole (that's what broke the pipeline-config → UCMV handoff)."""
+        from src.engines.crewai.tools.custom.pipeline_config_generator_tool import (
+            _UNRESOLVED_MQUERY_PREVIEW_CHARS,
+        )
+        huge_unresolvable = 'let Source = Databricks.Query("h","p") in Source' + ("x" * 5000)
+        admin_tables = {"T": {"mquery_expression": huge_unresolvable, "measures": []}}
+        out = PipelineConfigGeneratorTool._build_ucmv_mquery(admin_tables)
+        assert len(out[0]["transpiled_sql"]) == _UNRESOLVED_MQUERY_PREVIEW_CHARS
+        assert out[0]["transpiled_sql"] == huge_unresolvable[:_UNRESOLVED_MQUERY_PREVIEW_CHARS]
+
+
+class TestEnrichSourceTablesWithExpressions:
+    """_enrich_source_tables_from_mquery must also benefit from reference-
+    following / parameter-driven resolution when a dimension's own M alone
+    isn't enough."""
+
+    def test_fills_source_table_via_reference_following(self):
+        config = {"join_key_map": {"DimVendor": {"source_table": "TODO: fill"}}}
+        admin_tables = {
+            "DimVendor": {
+                "mquery_expression": 'let Source = #"Staging Vendor" in Source',
+            },
+        }
+        expressions = {
+            "Staging Vendor": (
+                'let Source = Databricks.Catalogs("h","p"){[Name="cat"]}[Data]'
+                '{[Name="sch"]}[Data]{[Name="tbl"]}[Data] in Source'
+            ),
+        }
+        log = PipelineConfigGeneratorTool._enrich_source_tables_from_mquery(
+            config, admin_tables, expressions)
+        assert config["join_key_map"]["DimVendor"]["source_table"] == "cat.sch.tbl"
+        assert log[0]["status"] == "filled"
+
+    def test_without_expressions_stays_todo(self):
+        config = {"join_key_map": {"DimVendor": {"source_table": "TODO: fill"}}}
+        admin_tables = {
+            "DimVendor": {"mquery_expression": 'let Source = #"Staging Vendor" in Source'},
+        }
+        log = PipelineConfigGeneratorTool._enrich_source_tables_from_mquery(
+            config, admin_tables, None)
+        assert config["join_key_map"]["DimVendor"]["source_table"] == "TODO: fill"
+        assert log[0]["status"] == "skipped"
+
 
 # ---------------------------------------------------------------------------
 # Measure allocation (P0 re-homing: holder-table measures → referenced facts)
@@ -1188,6 +1275,84 @@ class TestReportIdAutoDiscovery:
 
     def test_api_failure_returns_none(self):
         assert self._discover([], status=403) is None
+
+
+class TestParseAdminExpressions:
+    """parse_admin_expressions: pull a model's named/shared expressions (and
+    parameters — an expression is just one tagged IsParameterQuery=true) out
+    of an Admin Scan result. Lives in a SEPARATE dataset key from `tables`, so
+    a table that's only a reference to a disabled staging query, or whose
+    source is built from parameters, is invisible without this."""
+
+    def _gc(self):
+        return PipelineConfigGeneratorTool()._import_generate_config()
+
+    def test_extracts_expressions_for_matching_dataset(self):
+        gc = self._gc()
+        scan_result = {"workspaces": [{"datasets": [
+            {"id": "ds1", "tables": [], "expressions": [
+                {"name": "f_vendor_universe - DataBricks SQL", "expression": "let Source = Databricks.Catalogs() in Source"},
+                {"name": "Catalog_Name", "expression": '"dc_prod_001" meta [IsParameterQuery = true]'},
+            ]},
+            {"id": "ds2", "tables": [], "expressions": [{"name": "Other", "expression": "x"}]},
+        ]}]}
+        exprs = gc.parse_admin_expressions(scan_result, dataset_id="ds1")
+        assert set(exprs) == {"f_vendor_universe - DataBricks SQL", "Catalog_Name"}
+        assert exprs["Catalog_Name"] == '"dc_prod_001" meta [IsParameterQuery = true]'
+
+    def test_no_dataset_id_filter_includes_all(self):
+        gc = self._gc()
+        scan_result = {"workspaces": [{"datasets": [
+            {"id": "ds1", "expressions": [{"name": "A", "expression": "x"}]},
+            {"id": "ds2", "expressions": [{"name": "B", "expression": "y"}]},
+        ]}]}
+        exprs = gc.parse_admin_expressions(scan_result)
+        assert set(exprs) == {"A", "B"}
+
+    def test_no_match_returns_empty(self):
+        gc = self._gc()
+        scan_result = {"workspaces": [{"datasets": [{"id": "ds1", "expressions": []}]}]}
+        assert gc.parse_admin_expressions(scan_result, dataset_id="nope") == {}
+
+    def test_missing_expressions_key_returns_empty(self):
+        gc = self._gc()
+        scan_result = {"workspaces": [{"datasets": [{"id": "ds1", "tables": []}]}]}
+        assert gc.parse_admin_expressions(scan_result, dataset_id="ds1") == {}
+
+
+class TestParseTmdlExpressions:
+    """Fabric TMDL fallback equivalent — best-effort (not live-verified, see
+    the function's own docstring), but must not crash on real-shaped input."""
+
+    def _gc(self):
+        return PipelineConfigGeneratorTool()._import_generate_config()
+
+    def test_parses_single_expressions_file_multiple_blocks(self):
+        gc = self._gc()
+        content = (
+            'expression Catalog_Name =\n'
+            '\t\t"dc_prod_001" meta [IsParameterQuery = true]\n'
+            '\tlineageTag: abc-123\n'
+            '\n'
+            'expression Database =\n'
+            '\t\t"golden_schema" meta [IsParameterQuery=true]\n'
+            '\tlineageTag: def-456\n'
+        )
+        parts = [{"path": "definition/expressions.tmdl",
+                   "payload": base64.b64encode(content.encode()).decode()}]
+        exprs = gc.parse_tmdl_expressions(parts)
+        assert exprs["Catalog_Name"] == '"dc_prod_001" meta [IsParameterQuery = true]'
+        assert exprs["Database"] == '"golden_schema" meta [IsParameterQuery=true]'
+
+    def test_ignores_non_expression_parts(self):
+        gc = self._gc()
+        parts = [{"path": "definition/tables/T.tmdl", "payload": base64.b64encode(b"table T\n").decode()}]
+        assert gc.parse_tmdl_expressions(parts) == {}
+
+    def test_empty_or_none_input(self):
+        gc = self._gc()
+        assert gc.parse_tmdl_expressions(None) == {}
+        assert gc.parse_tmdl_expressions([]) == {}
 
 
 class TestDaxQualityGuard:

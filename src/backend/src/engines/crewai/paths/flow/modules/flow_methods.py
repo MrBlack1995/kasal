@@ -18,9 +18,15 @@ logger = LoggerManager.get_instance().flow
 
 # Per-crew kickoff timeout for flow execution. Large Power BI models (hundreds of
 # measures, dozens of fact tables + opt-in LLM DAX translation) can legitimately
-# take longer than the original 10 min. Bumped to 20 min as headroom; the DAX LLM
-# fallback is also now bounded-concurrent so it finishes far faster than before.
-CREW_KICKOFF_TIMEOUT_SECONDS = 1200.0
+# take longer than the original 10 min, then the 20 min this was bumped to next.
+# Confirmed in production: a 55-fact-table report (DCC) timed out at 20 min —
+# MetricViewPipeline processes fact tables SEQUENTIALLY (pipeline.py), and each
+# table's own LLM DAX-fallback batch (table_processor.py -> dax_llm_fallback.py,
+# itself bounded-concurrent within a table) blocks before the next table starts.
+# Bumped to 55 min, leaving a 5 min margin under process_flow_executor's outer
+# 3600s (1 hour) subprocess watchdog (flow_execution_runner.py) — that outer
+# timeout would need raising too if this one ever needs to grow further.
+CREW_KICKOFF_TIMEOUT_SECONDS = 3300.0
 
 
 def extract_final_answer(results) -> str:

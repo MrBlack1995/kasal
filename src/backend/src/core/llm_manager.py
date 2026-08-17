@@ -868,7 +868,7 @@ class LLMManager:
             "messages": messages,
             "temperature": temperature,
         }
-        for attr in ("api_key", "api_base"):
+        for attr in ("api_key", "api_base", "timeout"):
             val = getattr(llm, attr, None)
             if val:
                 call_kwargs[attr] = val
