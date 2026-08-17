@@ -685,7 +685,7 @@ async def _ensure_documentation_embeddings_columns(conn) -> None:
     built-in doc seeding, and group-scoped search (all reference the columns).
     Safe to run on every startup; the embedding column is unchanged here.
     """
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     try:
         if is_sqlite:
             res = await conn.exec_driver_sql(
@@ -778,7 +778,7 @@ async def _ensure_chat_sessions_columns(conn) -> None:
     saving/reading previews and the running-job marker. Safe to run every
     startup; all columns are nullable with no default.
     """
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     columns = [
         ("running_job_id", "VARCHAR"),
         ("preview_type", "VARCHAR(50)"),
@@ -812,7 +812,7 @@ async def _ensure_crew_columns(conn) -> None:
     existing table, so DBs created before this column existed (e.g. deployed
     customer instances) would silently drop the saved reasoning PlanningConfig
     on save/reload. Safe to run every startup; column is nullable JSON/TEXT."""
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     try:
         if is_sqlite:
             res = await conn.exec_driver_sql("PRAGMA table_info(crews)")
@@ -843,7 +843,7 @@ async def _disable_bi_specialist_crew_memory(conn) -> None:
     is insert-only (it skips a group that already exists), so DBs seeded before
     this change keep memory on. This self-heals them. Safe to run every startup —
     it only flips rows that are still True, scoped to the bi-specialist group."""
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     # SQLite stores booleans as 0/1; Postgres uses true/false. exec_driver_sql
     # with a literal keeps this dialect-agnostic enough for both.
     true_val = "1" if is_sqlite else "true"
@@ -869,7 +869,7 @@ async def _ensure_ui_config_columns(conn) -> None:
     created via create_all, but create_all never ALTERs an existing table — so DBs
     created before catalog_json/style_json existed would silently drop a workspace's
     A2UI catalog + branding on save/reload. Safe to run every startup (nullable TEXT)."""
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     columns = ("catalog_json", "style_json")
     try:
         if is_sqlite:
@@ -973,6 +973,53 @@ async def _ensure_powerbi_extraction_table(conn) -> None:
         logger.warning(f"Could not ensure powerbi_extraction table: {e}")
 
 
+async def _ensure_powerbi_extraction_expressions_column(conn) -> None:
+    """Idempotently add `expressions` to powerbi_extraction.
+
+    Added after the table itself was already deployed on some environments —
+    create_all/checkfirst (`_ensure_powerbi_extraction_table`) only creates the
+    table when entirely absent, it never ALTERs an existing one. Without this,
+    the UC Metric View Generator's DB fallback (which SELECTs this column to
+    rebuild mquery_json/measures_json from Crew 1's already-computed result)
+    fails outright with `UndefinedColumnError` on any DB that had the table
+    before this column was added — exactly the gap that broke that fallback in
+    production. Safe to run on every startup.
+
+    Branches on the DIALECT OF THE CONNECTION PASSED IN (``conn.dialect.name``),
+    NOT ``settings.DATABASE_URI``. The Lakebase connect/migrate/expand flows
+    call this against a freshly-opened Postgres engine for the TARGET Lakebase
+    instance while the app's own primary DB is still SQLite (Lakebase hasn't
+    been swapped in as primary yet) — branching on the global setting there
+    took the SQLite `PRAGMA table_info` path against an actual Postgres
+    connection, which raises immediately and was silently swallowed by this
+    function's own except-block, so the column was never actually added
+    despite every caller reporting success.
+    """
+    is_sqlite = conn.dialect.name == "sqlite"
+    try:
+        if is_sqlite:
+            res = await conn.exec_driver_sql("PRAGMA table_info(powerbi_extraction)")
+            cols = {row[1] for row in res.fetchall()}
+            if not cols:
+                return  # table not created yet
+            if "expressions" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE powerbi_extraction ADD COLUMN expressions TEXT"
+                )
+                logger.info(
+                    "Added powerbi_extraction.expressions column (SQLite self-heal)"
+                )
+        else:
+            await conn.exec_driver_sql(
+                "ALTER TABLE powerbi_extraction ADD COLUMN IF NOT EXISTS expressions JSON"
+            )
+            logger.info("Ensured powerbi_extraction.expressions column")
+    except Exception as e:
+        logger.warning(
+            f"Could not ensure powerbi_extraction.expressions column: {e}"
+        )
+
+
 async def _ensure_databricks_config_columns(conn) -> None:
     """Idempotently add ai_gateway_enabled to databricksconfig.
 
@@ -981,8 +1028,15 @@ async def _ensure_databricks_config_columns(conn) -> None:
     we cannot migrate manually) are missing it — which breaks reading/writing
     the Databricks configuration. Safe to run on every startup; defaults to
     false (serving-endpoints routing) to preserve existing behavior.
+
+    Branches on ``conn.dialect.name``, not ``settings.DATABASE_URI`` — see
+    ``_ensure_powerbi_extraction_expressions_column`` for why: the global
+    setting reflects the app's own primary DB, not necessarily the dialect of
+    whatever connection was actually passed in (e.g. a Lakebase
+    connect/migrate flow's freshly-opened Postgres engine, while the app's
+    primary DB is still SQLite).
     """
-    is_sqlite = str(settings.DATABASE_URI).startswith("sqlite")
+    is_sqlite = conn.dialect.name == "sqlite"
     try:
         if is_sqlite:
             res = await conn.exec_driver_sql("PRAGMA table_info(databricksconfig)")
@@ -1007,7 +1061,7 @@ async def _ensure_databricks_config_columns(conn) -> None:
         )
 
 
-async def run_schema_self_heal(conn) -> None:
+async def run_schema_self_heal(engine) -> None:
     """Create missing tables and add missing columns on an existing DB.
 
     ``create_all`` fully creates a NEW table but never ALTERs an existing one, so
@@ -1020,18 +1074,55 @@ async def run_schema_self_heal(conn) -> None:
     the active Lakebase engine after the runtime hot-swap (``main.py`` lifespan) —
     the latter is the only path that heals a customer's PRE-EXISTING Lakebase,
     which ``init_db`` alone misses because it fires before Lakebase activation.
+
+    Takes an ``AsyncEngine`` (not a ``Connection``) and opens a FRESH
+    connection + transaction per step, rather than sharing one connection
+    across all steps. Two savepoint-based approaches (a plain
+    ``async with conn.begin_nested():`` per step, then an explicit
+    ``commit()``/``rollback()`` pair) were tried and both failed in
+    production. On Postgres, ONE failed statement aborts the entire
+    enclosing transaction — every later statement on that same connection is
+    rejected with "current transaction is aborted" until a real rollback
+    happens, even if the step that failed caught its own exception internally
+    (that only stops Python-level propagation; it does nothing for the
+    connection's transaction state). Every ``_ensure_*`` helper below already
+    catches its own internal errors (to log a warning per sub-step instead of
+    aborting the whole healer), so a savepoint wrapped around the call never
+    sees an exception to react to — it only discovers the problem when it
+    tries to commit, and by then a plain ``ROLLBACK TO SAVEPOINT`` did not
+    reliably leave the connection usable for the NEXT step's own
+    ``SAVEPOINT`` statement either (observed: every step after the first
+    failing one kept failing, each at its own ``SAVEPOINT``/``RELEASE
+    SAVEPOINT`` line, even though each got its own supposedly-isolated
+    savepoint). A fresh connection per step sidesteps all of that — there is
+    no shared transaction state left for one step's failure to poison.
     """
-    await _ensure_documentation_embeddings_columns(conn)
-    await _ensure_databricks_config_columns(conn)
-    await _ensure_chat_sessions_table(conn)
-    await _ensure_chat_sessions_columns(conn)
-    await _ensure_crew_feedback_table(conn)
-    await _ensure_powerbi_extraction_table(conn)
-    await _ensure_crew_columns(conn)
-    await _ensure_ui_config_columns(conn)
-    await _ensure_hot_polling_indexes(conn)
-    await _heal_personal_group_names(conn)
-    await _disable_bi_specialist_crew_memory(conn)
+    is_sqlite = engine.dialect.name == "sqlite"
+    healers = (
+        _ensure_documentation_embeddings_columns,
+        _ensure_databricks_config_columns,
+        _ensure_chat_sessions_table,
+        _ensure_chat_sessions_columns,
+        _ensure_crew_feedback_table,
+        _ensure_powerbi_extraction_table,
+        _ensure_powerbi_extraction_expressions_column,
+        _ensure_crew_columns,
+        _ensure_ui_config_columns,
+        _ensure_hot_polling_indexes,
+        _heal_personal_group_names,
+        _disable_bi_specialist_crew_memory,
+    )
+    for healer in healers:
+        try:
+            async with engine.begin() as conn:
+                if not is_sqlite:
+                    # search_path is per-connection, so it must be set on
+                    # THIS fresh connection — it is not inherited from
+                    # whatever connection the caller set it on earlier.
+                    await conn.execute(text("SET search_path TO kasal, public"))
+                await healer(conn)
+        except Exception as e:
+            logger.warning(f"Schema self-heal step '{healer.__name__}' failed (isolated to its own connection): {e}")
 
 
 async def init_db() -> None:
@@ -1221,8 +1312,7 @@ async def init_db() -> None:
                 str(settings.DATABASE_URI), future=True, echo=SQL_DEBUG
             )
             try:
-                async with ensure_engine.begin() as conn:
-                    await run_schema_self_heal(conn)
+                await run_schema_self_heal(ensure_engine)
             finally:
                 await ensure_engine.dispose()
         except Exception as ensure_err:
