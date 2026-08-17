@@ -15,6 +15,20 @@ _RETURN_PATTERN = re.compile(r'RETURN(.*)$', re.IGNORECASE | re.DOTALL)
 _MAX_VAR_SUBSTITUTION_ITERATIONS = 100
 _VAR_SUBSTITUTION_WARNING_THRESHOLD = 95
 
+# Hard cap on the character length of any expression produced by variable
+# substitution. Textual VAR substitution expands chained VARs that each
+# reference the next more than once as ~2^N: a ~28-deep chain expands to
+# multiple GB, and both the substitution and the follow-on parse_function_call()
+# then peg CPU/RAM for ~an hour with zero log output before an outer watchdog
+# kills the run (observed on large Power BI reports, e.g. DCC/PAAT). The
+# 100-iteration cap above never trips because the size explodes within ~21
+# iterations. Legit measures expand to at most a few KB even fully substituted,
+# so 200 KB is a generous ceiling. Exceeding it fails OPEN: a RuntimeError is
+# raised and the caller (ExpressionValidator.validate_measure_by_name /
+# MetricExpressionValidatorPipeline) already catches it, marking that one
+# measure ERROR/skipped instead of hanging the entire per-table validation loop.
+_MAX_EXPANDED_EXPR_CHARS = 200_000
+
 
 class DAXExpressionParser:
     """Parser for DAX expressions with hierarchical decomposition."""
@@ -220,9 +234,21 @@ class DAXExpressionParser:
                     )
                     
                     if new_expr != var["variable_expr"]:
+                        if len(new_expr) > _MAX_EXPANDED_EXPR_CHARS:
+                            logger.error(
+                                "DAX variable substitution for '%s' exceeded %d chars "
+                                "(likely exponential VAR-chain expansion); aborting to "
+                                "avoid a parser hang.",
+                                var["variable_name"], _MAX_EXPANDED_EXPR_CHARS,
+                            )
+                            raise RuntimeError(
+                                "DAX variable substitution exceeded maximum expression "
+                                f"size ({_MAX_EXPANDED_EXPR_CHARS} chars); possible "
+                                "exponential VAR-chain expansion."
+                            )
                         var["variable_expr"] = new_expr
                         changed = True
-                
+
                 # Update the working list
                 working_vars[i] = var
             
@@ -262,7 +288,21 @@ class DAXExpressionParser:
             }
         """
         expr = expr.strip()
-        
+
+        # Defense-in-depth: never recurse over a pathologically large expression
+        # (e.g. one produced by exponential VAR-chain substitution). The
+        # substitution guards above normally catch this first; this covers the
+        # no-VAR branch where a raw expression is already enormous.
+        if len(expr) > _MAX_EXPANDED_EXPR_CHARS:
+            logger.error(
+                "DAX expression to parse exceeded %d chars; aborting to avoid a "
+                "parser hang.", _MAX_EXPANDED_EXPR_CHARS,
+            )
+            raise RuntimeError(
+                "DAX expression exceeded maximum size "
+                f"({_MAX_EXPANDED_EXPR_CHARS} chars) for parsing."
+            )
+
         # Find the function name (everything before the first '(' or '{')
         paren_pos = expr.find('(')
         
@@ -367,20 +407,34 @@ class DAXExpressionParser:
         toplevel_components = self.decompose_toplevel(cleaned)
         
         if toplevel_components.get("variables"):
-            substituted_vars = self.substitute_all_variables_recursively(toplevel_components["variables"])
-            
-            resulting_return_expr = toplevel_components["return_expr"]
-            for svar in substituted_vars:
-                resulting_return_expr = self._substitute_single_variable(
-                    resulting_return_expr, 
-                    svar["variable_name"], 
-                    svar["variable_expr"]
-                )
+            # Chained VARs where each references the next more than once expand
+            # as ~2^N under *textual* substitution and wedge the parser for ~an
+            # hour (see substitute_all_variables_recursively). We don't need the
+            # flattened text: every downstream comparison in ExpressionValidator
+            # is over SETS of aggregations / filters / column-references
+            # (_compare_aggregations / _compare_filters / _compare_columns), so a
+            # subtree that appears N times carries no more signal than once.
+            #
+            # So instead of substituting, parse the RETURN expression and each
+            # RELEVANT VAR expression exactly ONCE and union them under a
+            # synthetic root. The _extract_*_from_tree walkers then collect the
+            # union across all of them. This is linear in the DAX length, yields
+            # the same component sets as full substitution for normal measures,
+            # and no longer explodes on chained-VAR measures. Repeated variable
+            # references (e.g. "v1 + v1") become inert `{"value": "v1"}` leaves,
+            # while each variable's real content is parsed from its own subtree.
+            subtrees: List[Dict[str, Any]] = []
+            return_expr = toplevel_components.get("return_expr")
+            if return_expr:
+                subtrees.append(self.parse_function_call(return_expr))
+            for var in toplevel_components["variables"]:
+                subtrees.append(self.parse_function_call(var["variable_expr"]))
+            return {"function": "__VARS_ROOT__", "arguments": subtrees}
         elif toplevel_components.get("return_expr"):
             resulting_return_expr = toplevel_components["return_expr"]
         else:
             resulting_return_expr = toplevel_components["expr"]
-        
+
         return self.parse_function_call(resulting_return_expr)
     
     def _parse_condition(self, condition: str) -> Dict[str, Any]:

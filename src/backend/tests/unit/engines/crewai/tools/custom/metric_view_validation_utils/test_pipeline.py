@@ -265,3 +265,58 @@ class TestMappingMerge:
             table_mappings={"fact": "source"},
         )
         assert result["is_valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# Chained-VAR measures must validate (not hang, not be skipped)
+# ---------------------------------------------------------------------------
+
+def _chained_var_dax(n: int, refs: int = 2) -> str:
+    """Depth-n chained-VAR measure reducing to SUM(fact[amount]); each VAR
+    references the next ``refs`` times (the historical ~2^N textual-expansion
+    hang)."""
+    lines = []
+    for i in range(1, n + 1):
+        if i < n:
+            lines.append(f"VAR v{i} = " + " + ".join([f"v{i + 1}"] * refs))
+        else:
+            lines.append(f"VAR v{i} = SUM(fact[amount])")
+    lines.append("RETURN " + " + ".join(["v1"] * refs))
+    return "\n".join(lines)
+
+
+class TestChainedVarValidation:
+    def test_direct_chained_var_validates_valid(self):
+        # A depth-30 chained-VAR DAX (would have hung) validates as a clean
+        # match against the generated Databricks SUM.
+        pipe = MetricExpressionValidatorPipeline(table_mappings={"fact": "source"})
+        result = pipe.run(
+            databricks_expr="SUM(source.amount)",
+            dax_expr=_chained_var_dax(30),
+        )
+        assert result["is_valid"] is True
+        assert result["status"] == "VALID"
+
+    def test_file_based_chained_var_is_evaluated_not_skipped(self, tmp_path):
+        yaml_file = tmp_path / "mv.yaml"
+        yaml_file.write_text(textwrap.dedent("""\
+            measures:
+              - name: chained_measure
+                expr: "SUM(source.amount) + SUM(source.amount)"
+                comment: ""
+        """))
+        json_file = tmp_path / "mapping.json"
+        json_file.write_text(json.dumps([
+            {"measure_name": "chained_measure",
+             "dax_expression": _chained_var_dax(30),
+             "proposed_allocation": "fact"},
+        ]))
+        result = MetricExpressionValidatorPipeline(
+            table_mappings={"fact": "source"}
+        ).run(
+            metrics_view_yaml_path=str(yaml_file),
+            table_mapping_json_path=str(json_file),
+        )
+        # The measure is evaluated (scored), not skipped or errored away.
+        evaluated_names = {m.get("measure_name") for m in result.get("evaluated", [])}
+        assert "chained_measure" in evaluated_names

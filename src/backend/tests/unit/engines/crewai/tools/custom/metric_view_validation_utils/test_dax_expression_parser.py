@@ -4,7 +4,25 @@ import pytest
 from src.engines.crewai.tools.custom.metric_view_validation_utils.dax_expression_parser import (
     DAXExpressionParser,
     _MAX_VAR_SUBSTITUTION_ITERATIONS,
+    _MAX_EXPANDED_EXPR_CHARS,
 )
+
+
+def _chained_var_dax(n: int, refs: int = 2) -> str:
+    """A depth-n chained-VAR measure reducing to SUM(fact_sales[amount]).
+
+    Each VAR references the next ``refs`` times, so *textual* substitution would
+    expand it to ~refs**n characters (the historical ~1h hang). It stays a single
+    SUM over one reference, so the parser must still report that cleanly.
+    """
+    lines = []
+    for i in range(1, n + 1):
+        if i < n:
+            lines.append(f"VAR v{i} = " + " + ".join([f"v{i + 1}"] * refs))
+        else:
+            lines.append(f"VAR v{i} = SUM(fact_sales[amount])")
+    lines.append("RETURN " + " + ".join(["v1"] * refs))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +235,49 @@ class TestSubstituteAllVariablesRecursively:
         ]
         with pytest.raises(RuntimeError, match="maximum iterations"):
             parser.substitute_all_variables_recursively(vars_)
+
+    def test_size_cap_fails_open_on_exponential_chain(self, parser):
+        # Retained public helper still guards any external caller that drives it
+        # into exponential VAR-chain expansion: it must fail open (RuntimeError),
+        # never hang. decompose()/parse() no longer route through this method.
+        vars_ = [
+            {"variable_name": f"v{i}", "variable_expr": f"v{i + 1} + v{i + 1}"}
+            for i in range(1, 30)
+        ]
+        vars_.append({"variable_name": "v30", "variable_expr": "SUM(f[a])"})
+        with pytest.raises(RuntimeError, match="maximum expression size"):
+            parser.substitute_all_variables_recursively(vars_)
+
+
+# ---------------------------------------------------------------------------
+# Chained-VAR measures must parse in linear time without exploding
+# ---------------------------------------------------------------------------
+
+class TestChainedVarNoBlowup:
+    """Regression: chained VARs that each reference the next >1x used to expand
+    ~2^N under textual substitution and wedge the per-table validation loop for
+    ~an hour. decompose() now unions per-subtree components in linear time."""
+
+    def test_deep_chain_parses_fast(self, parser):
+        import time
+        t0 = time.time()
+        result = parser.parse(_chained_var_dax(40))
+        elapsed = time.time() - t0
+        assert elapsed < 2.0, f"chained-VAR parse took {elapsed:.2f}s (regression?)"
+        # Components are still recovered correctly from the union of subtrees.
+        assert any(a["type"] == "SUM" for a in result["aggregations"])
+        assert "fact_sales.amount" in result["references"]
+
+    def test_very_deep_chain_does_not_raise(self, parser):
+        # The linear union path never trips the size cap, even very deep.
+        result = parser.parse(_chained_var_dax(60))
+        assert any(a["type"] == "SUM" for a in result["aggregations"])
+
+    def test_expanded_return_stays_small(self, parser):
+        # decompose() must not build a giant flattened expression.
+        tree = parser.decompose(_chained_var_dax(50))
+        assert tree.get("function") == "__VARS_ROOT__"
+        assert len(str(tree)) < _MAX_EXPANDED_EXPR_CHARS
 
 
 # ---------------------------------------------------------------------------
