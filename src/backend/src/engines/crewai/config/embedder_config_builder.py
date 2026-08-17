@@ -18,6 +18,45 @@ from src.utils.databricks_url_utils import DatabricksURLUtils
 logger = LoggerManager.get_instance().crew
 
 
+def _embed_with_fail_open(embed_once, docs, dimension, max_attempts=3, sleep_fn=None):
+    """Call ``embed_once(docs)`` with bounded retry, then FAIL OPEN.
+
+    Crew memory is an enhancement, not part of producing the deliverable, so a
+    transient embedding failure (SSL/EOF, connection reset, 429/5xx) must never
+    propagate and fail the whole flow. Transport errors are always retried;
+    other errors are retried only if marked ``retryable`` (429/5xx). When all
+    attempts are exhausted we return zero vectors (one per doc) so CrewAI's
+    memory store/query degrades gracefully instead of raising.
+
+    ``sleep_fn`` is injectable for tests. Returns a list of embedding vectors.
+    """
+    import time
+    import requests
+
+    sleep_fn = sleep_fn or time.sleep
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return embed_once(docs)
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_err = e  # transport-level → always transient
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if not getattr(e, "retryable", False):
+                break  # non-transient (auth, malformed response) → stop retrying
+        if attempt < max_attempts:
+            sleep_fn(min(2 ** attempt, 8))
+
+    logger.warning(
+        "[Embedder] fail-open after %d attempt(s): %s — returning %d zero vector(s) "
+        "(dim=%d) so crew memory degrades instead of failing the flow",
+        max_attempts, last_err, len(docs), dimension,
+    )
+    return [[0.0] * dimension for _ in docs]
+
+
 class EmbedderConfigBuilder:
     """Handles embedder configuration for different providers"""
 
@@ -156,80 +195,97 @@ class EmbedderConfigBuilder:
 
             # Create custom embedding function
             class DatabricksEmbeddingFunction(EmbeddingFunction):
+                # gte-large-en produces 1024-dim vectors; used for the fail-open
+                # fallback so a transient embedding hiccup can't fail the flow.
+                _FALLBACK_DIM = 1024
+                _MAX_ATTEMPTS = 3
+
                 def __init__(self, api_key: str = None, api_base: str = None, model: str = None,
-                             auth_headers: dict = None, user_token: str = None):
+                             auth_headers: dict = None, user_token: str = None,
+                             embedding_dimension: int = 1024):
                     self.api_key = api_key
                     self.api_base = api_base
                     self.model = model
                     self.auth_headers = auth_headers
                     self.user_token = user_token
+                    self.embedding_dimension = embedding_dimension or self._FALLBACK_DIM
+
+                def _embed_once(self, docs: list) -> Embeddings:
+                    """One embedding HTTP round-trip. Raises on any failure."""
+                    import requests
+
+                    workspace_url = DatabricksURLUtils.extract_workspace_from_endpoint(self.api_base)
+                    # AI Gateway on  -> /ai-gateway/mlflow/v1/embeddings (model in body)
+                    # AI Gateway off -> /serving-endpoints/<model>/invocations (model in path)
+                    endpoint_url, body_model = DatabricksURLUtils.construct_embeddings_url(workspace_url, self.model)
+
+                    if not endpoint_url:
+                        raise Exception("Failed to construct valid endpoint URL")
+
+                    logger.debug(f"Databricks embedding endpoint URL: {endpoint_url}")
+                    payload: dict = {"input": docs}
+                    if body_model:
+                        payload["model"] = body_model
+
+                    # Prepare headers - prioritize user token for OBO auth
+                    if self.user_token:
+                        headers = {
+                            "Authorization": f"Bearer {self.user_token}",
+                            "Content-Type": "application/json"
+                        }
+                        logger.debug("Using OBO token for embeddings")
+                    elif self.auth_headers:
+                        headers = self.auth_headers.copy()
+                    elif self.api_key:
+                        headers = {
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json"
+                        }
+                    else:
+                        logger.error("No authentication method available for Databricks embeddings")
+                        raise Exception("No authentication method available")
+
+                    # Add User-Agent header for Databricks API attribution
+                    from src.utils.telemetry import get_user_agent_header, KasalProduct, send_logfood_telemetry_sync
+                    headers.update(get_user_agent_header(KasalProduct.EMBEDDING))
+
+                    response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
+                    if response.status_code == 200:
+                        result = response.json()
+                        if 'data' in result and len(result['data']) > 0:
+                            embeddings = [item.get('embedding', item) for item in result['data']]
+                            usage = result.get('usage', {})
+                            if usage:
+                                auth_token = self.user_token or self.api_key
+                                send_logfood_telemetry_sync(
+                                    usage=usage,
+                                    model=self.model,
+                                    product_context=KasalProduct.EMBEDDING,
+                                    workspace_url=workspace_url,
+                                    token=auth_token
+                                )
+                            return cast(Embeddings, embeddings)
+                        raise Exception(f"Unexpected response format: {result}")
+                    # Non-200: mark retryable transient statuses distinctly.
+                    err = Exception(f"Embedding API error {response.status_code}: {response.text[:300]}")
+                    err.retryable = response.status_code in (429, 500, 502, 503, 504)  # type: ignore[attr-defined]
+                    raise err
 
                 def __call__(self, input: Documents) -> Embeddings:
-                    try:
-                        import requests
+                    """Embed with bounded retry + fail-open (see _embed_with_fail_open).
 
-                        workspace_url = DatabricksURLUtils.extract_workspace_from_endpoint(self.api_base)
-                        # AI Gateway on  -> /ai-gateway/mlflow/v1/embeddings (model in body)
-                        # AI Gateway off -> /serving-endpoints/<model>/invocations (model in path)
-                        endpoint_url, body_model = DatabricksURLUtils.construct_embeddings_url(workspace_url, self.model)
-
-                        if not endpoint_url:
-                            raise Exception("Failed to construct valid endpoint URL")
-
-                        logger.debug(f"Databricks embedding endpoint URL: {endpoint_url}")
-                        payload: dict = {"input": input if isinstance(input, list) else [input]}
-                        if body_model:
-                            payload["model"] = body_model
-
-                        # Prepare headers - prioritize user token for OBO auth
-                        if self.user_token:
-                            headers = {
-                                "Authorization": f"Bearer {self.user_token}",
-                                "Content-Type": "application/json"
-                            }
-                            logger.debug("Using OBO token for embeddings")
-                        elif self.auth_headers:
-                            headers = self.auth_headers.copy()
-                        elif self.api_key:
-                            headers = {
-                                "Authorization": f"Bearer {self.api_key}",
-                                "Content-Type": "application/json"
-                            }
-                        else:
-                            logger.error("No authentication method available for Databricks embeddings")
-                            raise Exception("No authentication method available")
-                        
-                        # Add User-Agent header for Databricks API attribution
-                        from src.utils.telemetry import get_user_agent_header, KasalProduct, send_logfood_telemetry_sync
-                        headers.update(get_user_agent_header(KasalProduct.EMBEDDING))
-
-                        response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
-                        if response.status_code == 200:
-                            result = response.json()
-                            if 'data' in result and len(result['data']) > 0:
-                                embeddings = [item.get('embedding', item) for item in result['data']]
-                                
-                                # Send token usage to Databricks logfood
-                                usage = result.get('usage', {})
-                                if usage:
-                                    auth_token = self.user_token or self.api_key
-                                    send_logfood_telemetry_sync(
-                                        usage=usage,
-                                        model=self.model,
-                                        product_context=KasalProduct.EMBEDDING,
-                                        workspace_url=workspace_url,
-                                        token=auth_token
-                                    )
-
-                                return cast(Embeddings, embeddings)
-                            else:
-                                raise Exception(f"Unexpected response format: {result}")
-                        else:
-                            raise Exception(f"Embedding API error {response.status_code}: {response.text}")
-
-                    except Exception as e:
-                        logger.error(f"Error in Databricks embedding function: {e}")
-                        raise e
+                    Crew memory is an enhancement, not part of producing the metric
+                    view — so a transient embedding failure (SSL/EOF, connection
+                    reset, 429/5xx) must NEVER fail a flow whose generation already
+                    succeeded. (Observed: an SSLEOFError to the embedding endpoint
+                    flipped a completed UCMV run to FAILED.)
+                    """
+                    docs = list(input) if isinstance(input, list) else [input]
+                    return cast(Embeddings, _embed_with_fail_open(
+                        self._embed_once, docs,
+                        self.embedding_dimension or self._FALLBACK_DIM,
+                        self._MAX_ATTEMPTS,
+                    ))
 
             # Construct URLs (encodes the workspace; the embedding function re-derives
             # the workspace and picks serving-endpoints vs AI Gateway per the toggle)

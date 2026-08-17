@@ -25,6 +25,41 @@ CICD_ARTIFACT_QUERY = (
     "ORDER BY created_at ASC"
 )
 
+# Recover a UCMV generator result already persisted to the trace, so a run that
+# FAILED *after* generation (e.g. a downstream crew/memory hiccup) still surfaces
+# the drafts instead of losing them with the run. Newest first.
+UCMV_OUTPUT_QUERY = (
+    "SELECT output FROM execution_trace "
+    "WHERE job_id = :jid AND CAST(output AS TEXT) LIKE '%views_generated%' "
+    "ORDER BY created_at DESC"
+)
+
+
+async def _recover_ucmv_output(execution_id: str) -> Optional[str]:
+    """Return the most recent persisted UCMV generator output for a job, or None.
+
+    Used to salvage a completed generation when the flow later fails, so the UI
+    still shows the metric-view drafts. Best-effort: any error yields None.
+    """
+    import json as _json
+    from src.db.session import async_session_factory
+    from sqlalchemy import text as _text
+
+    async with async_session_factory() as _session:
+        _rows = await _session.execute(_text(UCMV_OUTPUT_QUERY), {'jid': execution_id})
+        _row = _rows.first()
+    if not _row or _row[0] is None:
+        return None
+    output = _row[0]
+    parsed = _json.loads(output) if isinstance(output, str) else output
+    # execution_trace wraps tool output as {"content": "<json_string>"}.
+    if isinstance(parsed, dict) and 'content' in parsed:
+        inner = parsed['content']
+        parsed = _json.loads(inner) if isinstance(inner, str) else inner
+    if isinstance(parsed, dict) and ('views_generated' in parsed or 'yaml' in parsed):
+        return _json.dumps(parsed)
+    return None
+
 
 async def update_execution_status_with_retry(
     execution_id: str,
@@ -243,6 +278,24 @@ async def run_flow_in_process(
                 final_status = ExecutionStatus.FAILED.value
                 final_message = result.get('error', 'Process execution failed')
                 logger.error(f"Flow execution failed for {execution_id}: {final_message}")
+
+                # Salvage: if the UCMV generation already succeeded and the flow
+                # only failed downstream (e.g. a crew-memory embedding hiccup),
+                # recover the produced drafts from the trace and surface them so
+                # they're not lost with the FAILED run. Status stays FAILED (the
+                # failure was real), but the user still gets the deliverable.
+                if final_result is None:
+                    try:
+                        recovered = await _recover_ucmv_output(execution_id)
+                        if recovered is not None:
+                            final_result = recovered
+                            final_message = (
+                                f"{final_message} — the metric-view generation had already "
+                                "succeeded; its output was recovered and is shown below.")
+                            logger.info(
+                                f"[recovery] Attached recovered UCMV output to FAILED run {execution_id}")
+                    except Exception as _rec_err:  # noqa: BLE001 - best-effort salvage
+                        logger.warning(f"[recovery] Could not recover UCMV output: {_rec_err}")
 
     except asyncio.CancelledError:
         # Execution was cancelled
