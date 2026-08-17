@@ -32,6 +32,10 @@ The tables below map common goals to the tools and guide that cover them.
 - [Simple migration story](./02-simple-migration-story.md)
 - [PBI → UCMV pipeline architecture](./ucmv-pipeline-architecture.md): end-to-end walkthrough — extraction → config → M-query path → LLM-first DAX translation with skill files → deploy, with the code location of each stage
 
+### Operations & troubleshooting
+
+- [Rate limits & throttling](./rate-limits-and-throttling.md): what to do when a run hits `REQUEST_LIMIT_EXCEEDED` — quota tier bump, Provisioned Throughput, and off-hours/retry, chosen by run cadence
+
 ### Case studies and examples
 
 - [Power BI analytics Q&A full case study](./powerbi-analytics-qa-case-study.md): 3-agent crew, context enrichment, business_mappings, field_synonyms, active_filters
