@@ -87,7 +87,14 @@ class UCMetricViewGeneratorTool(BaseTool):
                        'workspace_id', 'dataset_id', 'tenant_id', 'client_id',
                        'client_secret', 'username', 'password', 'auth_method',
                        'access_token', 'pbi_api_base_url',
-                       'admin_client_id', 'admin_client_secret')
+                       'admin_client_id', 'admin_client_secret',
+                       # Best-effort UCMV for thin-report models (no M-Query source
+                       # tables). Opt-in only; see thin-report-and-source-resolution.md.
+                       #   allow_best_effort : gate (default off → today's behavior)
+                       #   fact_source_map   : { pbi_table : "catalog.schema.table" }
+                       #                       physical sources the human supplies when
+                       #                       the model didn't carry them.
+                       'allow_best_effort', 'fact_source_map')
         default_config = {}
         for key in config_keys:
             val = kwargs.pop(key, None)
