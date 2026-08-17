@@ -660,6 +660,22 @@ class LakebaseService(BaseService):
                 await self.schema_service.set_search_path_async(conn)
 
             await self.schema_service.create_tables_async(lakebase_engine)
+
+            # create_tables_async only CREATEs tables that don't exist yet — it
+            # never ALTERs a table that's already there from a previous migrate.
+            # A customer who migrated to Lakebase before a column was added
+            # (e.g. powerbi_extraction.expressions) would otherwise never get
+            # it, since this manual "connect + migrate" flow is the only schema
+            # path that ever touches THIS Lakebase instance — main.py's own
+            # self-heal on startup only fires when Lakebase is ALREADY the
+            # active connection, which isn't true yet during this flow.
+            try:
+                from src.db.session import run_schema_self_heal
+                await run_schema_self_heal(lakebase_engine)
+                logger.info("✅ Lakebase schema self-heal complete (missing columns added)")
+            except Exception as _heal_err:
+                logger.warning(f"Lakebase schema self-heal skipped: {_heal_err}")
+
             logger.info("-" * 60)
             logger.info("📤 Starting data migration...")
 
@@ -892,6 +908,33 @@ class LakebaseService(BaseService):
             # Create tables with streaming
             for message in self.schema_service.create_tables_sync_stream(lakebase_engine):
                 yield message
+
+            # create_tables_sync_stream only CREATEs tables that don't exist yet
+            # — it never ALTERs a table that's already there from a previous
+            # migrate. This UI flow (Settings → connect + migrate) is the only
+            # schema path that ever touches a customer's Lakebase instance, so
+            # a customer who migrated before a column was added (e.g.
+            # powerbi_extraction.expressions) would otherwise never get it.
+            # Sync engine here (unlike migrate_existing_data's async one), so
+            # this runs the same idempotent ADD COLUMN IF NOT EXISTS statements
+            # directly rather than reusing session.py's async
+            # run_schema_self_heal — keep new columns there in sync with this
+            # list if you add more.
+            try:
+                with lakebase_engine.begin() as conn:
+                    # search_path is per-connection — this `begin()` opens a
+                    # fresh one that does NOT inherit the "SET search_path"
+                    # run earlier in this function on a different connection.
+                    # Without it, ALTER TABLE targets whatever schema is on
+                    # the default search_path (typically "public"), not
+                    # "kasal" where powerbi_extraction actually lives.
+                    conn.execute(text("SET search_path TO kasal, public"))
+                    conn.execute(text(
+                        "ALTER TABLE powerbi_extraction ADD COLUMN IF NOT EXISTS expressions JSON"
+                    ))
+                yield {"type": "success", "message": "✅ Schema self-heal: ensured powerbi_extraction.expressions column"}
+            except Exception as heal_err:
+                yield {"type": "warning", "message": f"Schema self-heal skipped: {heal_err}"}
 
             # Check if we should migrate data
             if not migrate_data:
@@ -1617,6 +1660,18 @@ class LakebaseService(BaseService):
                 async with lakebase_engine.begin() as conn:
                     await self.schema_service.set_search_path_async(conn)
                 await self.schema_service.create_tables_async(lakebase_engine)
+                # create_tables_async alone only CREATEs missing tables — this
+                # comment's "missing ... columns" claim needs the self-heal too
+                # (an existing table is never ALTERed by create_all/checkfirst).
+                try:
+                    from src.db.session import run_schema_self_heal
+                    # run_schema_self_heal sets search_path itself on each
+                    # fresh connection it opens from this engine — it does
+                    # NOT inherit the set_search_path_async call above, which
+                    # ran on a different connection.
+                    await run_schema_self_heal(lakebase_engine)
+                except Exception as heal_err:
+                    logger.warning(f"Lakebase schema expand self-heal skipped: {heal_err}")
                 logger.info(
                     "Lakebase schema expanded on enable (missing tables/columns "
                     "created non-destructively)"
