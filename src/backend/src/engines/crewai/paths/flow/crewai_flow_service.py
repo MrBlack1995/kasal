@@ -130,12 +130,21 @@ class CrewAIFlowService:
                             }
 
                 if agents_yaml or tasks_yaml:
-                    name_service = ExecutionNameService.create(self.session)
+                    # Build the service with session=None, NOT self.session. Name
+                    # generation interleaves DB reads (template, model config) with a
+                    # seconds-long LLM call. self.session is the REQUEST-scoped
+                    # session, which the request's own work may still be using — two
+                    # coroutines on one AsyncSession raises "This session is
+                    # provisioning a new connection; concurrent operations are not
+                    # permitted". session=None makes each read open its own
+                    # standalone session (see ExecutionNameService.create), so the
+                    # naming step can never contend with the request transaction.
                     request = ExecutionNameGenerationRequest(
                         agents_yaml=agents_yaml,
                         tasks_yaml=tasks_yaml,
                         model=config.get('model')
                     )
+                    name_service = ExecutionNameService.create(None)
                     response = await name_service.generate_execution_name(request)
                     run_name = response.name
                     logger.info(f"Generated run_name for flow: {run_name}")

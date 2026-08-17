@@ -89,6 +89,7 @@ const docSections: DocSection[] = [
       { label: 'Simple Migration Story', file: 'powerbi/02-simple-migration-story' },
       { label: 'Analytics Q&A Case Study', file: 'powerbi/powerbi-analytics-qa-case-study' },
       { label: 'End-to-End Migration Guide', file: 'powerbi/ucmv-migration-guide' },
+      { label: 'Thin Reports & Source Resolution', file: 'powerbi/thin-report-and-source-resolution' },
       { label: 'Pipeline Config Reference', file: 'UCMV_PIPELINE_CONFIG_GUIDE' },
       { label: 'Tool 72: Comprehensive Analysis', file: 'powerbi/tool-72-comprehensive-analysis' },
       { label: 'Tool 73: Measure Conversion', file: 'powerbi/tool-73-measure-conversion' },
