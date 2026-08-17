@@ -476,3 +476,46 @@ class TestAgentJunkKwargsGuard:
         result = tool._run(measures_json="", mquery_json="", config_json="")
         data = json.loads(result)
         assert not data.get("error", "").startswith("Invalid JSON")
+
+
+class TestBuildUnallocatedItems:
+    """Completeness: every measure not emitted and not noted untranslatable must
+    be surfaced here with a reason — never silently dropped."""
+
+    def test_reconciles_all_three_buckets(self):
+        specs = {
+            "fact_sales": {
+                "view_name": "mv_fact_sales",
+                "measures": [{"original_name": "Total Sales"}],       # emitted
+                "untranslatable": [{"original_name": "Weird Measure"}],  # noted
+            },
+        }
+        stats = {
+            "_Measures": {"skipped": True,
+                          "skip_reason": "inline constant table (slicer/selector helper)",
+                          "skip_category": "inline_const"},
+        }
+        measures = [
+            {"original_name": "Total Sales", "proposed_allocation": "fact_sales"},   # accounted (emitted)
+            {"original_name": "Weird Measure", "proposed_allocation": "fact_sales"}, # accounted (untranslatable)
+            {"original_name": "Amber", "proposed_allocation": "_Measures", "referenced_by": "5"},  # inline table
+            {"original_name": "Orphan", "proposed_allocation": "", "referenced_by": "2"},          # no allocation
+            {"original_name": "Dropped", "proposed_allocation": "fact_sales", "referenced_by": "0"},  # alloc has a view but not emitted
+        ]
+        items = UCMetricViewGeneratorTool._build_unallocated_items(measures, specs, stats)
+        by_name = {i["original_name"]: i for i in items}
+        # The two accounted measures are excluded.
+        assert "Total Sales" not in by_name and "Weird Measure" not in by_name
+        # The three leftovers are surfaced with the right categories.
+        assert by_name["Amber"]["category"] == "inline_const"
+        assert "inline constant table" in by_name["Amber"]["reason"]
+        assert by_name["Orphan"]["category"] == "unallocated"
+        assert by_name["Dropped"]["category"] == "dropped_in_generation"
+        assert all(i["needs_review"] for i in items)
+        # Sorted by impact (referenced_by desc): Amber(5) before Orphan(2).
+        assert [i["original_name"] for i in items][:2] == ["Amber", "Orphan"]
+
+    def test_empty_when_all_accounted(self):
+        specs = {"t": {"measures": [{"original_name": "M1"}], "untranslatable": []}}
+        measures = [{"original_name": "M1", "proposed_allocation": "t"}]
+        assert UCMetricViewGeneratorTool._build_unallocated_items(measures, specs, {}) == []

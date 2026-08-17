@@ -528,6 +528,16 @@ class UCMetricViewGeneratorTool(BaseTool):
                     f"{best_effort_report['measures_skipped_unresolved']} measure(s) unresolved and skipped. "
                     f"Tables/measures may be MISSING — every measure marked TODO: verify.")
 
+        # Completeness reconciliation: every measure must be translated, noted
+        # untranslatable, or surfaced here for review — never silently dropped.
+        unallocated_items = self._build_unallocated_items(
+            _measures_for_validation, results.get('specs', {}), results.get('stats', {}))
+        if unallocated_items:
+            logger.warning(
+                f"[UCMVGenerator] {len(unallocated_items)} measure(s) reached neither a view "
+                f"nor the untranslatable notes — surfaced in 'unallocated_items' for human "
+                f"review (completeness guarantee; e.g. holder table skipped / no fact reference)")
+
         output = {
             'yaml': yaml_output,
             'sql': sql_output,
@@ -552,6 +562,11 @@ class UCMetricViewGeneratorTool(BaseTool):
             # (full DAX + reason + category + dependency count). Additive; [] when
             # everything translated.
             'untranslatable_items': self._build_untranslatable_items(results.get('specs', {})),
+            # Measures that reached neither a view nor the untranslatable notes —
+            # every measure is now accounted for (translated / untranslatable /
+            # unallocated), so nothing is silently dropped. [] when fully covered.
+            'unallocated_items': unallocated_items,
+            'unallocated_count': len(unallocated_items),
             'specs_summary': {
                 k: {
                     'view_name': v.get('view_name'),
@@ -652,6 +667,74 @@ class UCMetricViewGeneratorTool(BaseTool):
                     'referenced_by': m.get('referenced_by', 0),
                 })
         # High-impact gaps first (most-depended-on measures at the top).
+        items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)
+        return items
+
+    @staticmethod
+    def _build_unallocated_items(all_measures: Any, specs: dict, stats: dict) -> list:
+        """Measures that reached NEITHER a view NOR the untranslatable notes.
+
+        Completeness guarantee: every measure must end up (1) translated into a
+        view, (2) documented as untranslatable in a view (``untranslatable_items``),
+        or (3) listed HERE with a reason — never silently dropped. These are the
+        measures whose holder table produced no view (inline/UI table, unparsed M
+        source, or all-measures-dropped-by-validation) or that were never allocated
+        to a fact. Surfaced so the run's true coverage is visible and a reviewer
+        can map a source/fact by hand. Additive; [] when everything is accounted for.
+        """
+        def _norm(s: Any) -> str:
+            return str(s or '').strip().lower()
+
+        def _as_int(v: Any) -> int:
+            try:
+                return int(str(v or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        # Names already accounted for: emitted into a view OR noted untranslatable.
+        accounted: set = set()
+        for spec in (specs or {}).values():
+            if not isinstance(spec, dict):
+                continue
+            for m in (spec.get('measures') or []):
+                if isinstance(m, dict):
+                    accounted.add(_norm(m.get('original_name') or m.get('name')))
+            for m in (spec.get('untranslatable') or []):
+                if isinstance(m, dict):
+                    accounted.add(_norm(m.get('original_name') or m.get('name')))
+
+        stats = stats if isinstance(stats, dict) else {}
+        specs = specs if isinstance(specs, dict) else {}
+        items: list = []
+        for m in (all_measures or []):
+            if not isinstance(m, dict):
+                continue
+            name = m.get('original_name') or m.get('measure_name')
+            if not name or _norm(name) in accounted:
+                continue
+            alloc = m.get('proposed_allocation') or ''
+            tstat = stats.get(alloc, {}) if isinstance(stats.get(alloc), dict) else {}
+            if tstat.get('skipped'):
+                reason = f"holder table '{alloc}' produced no view — {tstat.get('skip_reason', 'skipped')}"
+                category = tstat.get('skip_category') or 'table_skipped'
+            elif alloc and alloc in specs:
+                reason = (f"allocated to '{alloc}' but not emitted "
+                          "(dropped during generation/validation) — needs review")
+                category = 'dropped_in_generation'
+            else:
+                reason = (f"not allocated to any generated view (no known fact reference; "
+                          f"allocation='{alloc or 'none'}') — needs a human to map a source table / fact")
+                category = 'unallocated'
+            items.append({
+                'original_name': name,
+                'dax_expression': m.get('dax_expression', ''),
+                'proposed_allocation': alloc,
+                'reason': reason,
+                'category': category,
+                'referenced_by': _as_int(m.get('referenced_by', 0)),
+                'needs_review': True,
+            })
+        # Most-depended-on measures first (highest review impact).
         items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)
         return items
 
