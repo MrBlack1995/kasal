@@ -49,6 +49,12 @@ export interface UCMetricViewGeneratorConfig {
   oauth_client_id?: string;
   access_token?: string;
   pbi_api_base_url?: string;
+  // Admin Service Principal — optional 3rd fallback tier for MQuery extraction
+  // (retries the Admin Scanner itself with admin rights when the primary
+  // credentials above and the Fabric TMDL fallback both fail). Distinct from
+  // client_id/client_secret; mirrors Pipeline Config Generator's admin creds.
+  admin_client_id?: string;
+  admin_client_secret?: string;
   // JSON mode (paste JSONs directly)
   measures_json?: string;
   mquery_json?: string;
@@ -151,6 +157,8 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
         updatedConfig.password = undefined;
         updatedConfig.access_token = undefined;
         updatedConfig.pbi_api_base_url = undefined;
+        updatedConfig.admin_client_id = undefined;
+        updatedConfig.admin_client_secret = undefined;
       } else if (newMode === 'api') {
         updatedConfig.measures_json = undefined;
         updatedConfig.mquery_json = undefined;
@@ -477,6 +485,41 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
             helperText="Custom Power BI API base URL (leave empty for default)"
             size="small"
           />
+
+          <Divider sx={{ my: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Admin Service Principal (optional MQuery fallback)
+            </Typography>
+          </Divider>
+          <Alert severity="info" variant="outlined" sx={{ mb: 1 }}>
+            <Typography variant="caption">
+              Optional — only used if MQuery extraction fails via the credentials above AND Fabric TMDL
+              (e.g. the primary credentials lack tenant-admin API rights). Retries the Admin Scanner with
+              this Service Principal. Same admin Service Principal you use for the Pipeline Config
+              Generator&apos;s Admin credentials.
+            </Typography>
+          </Alert>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <TextField
+              label="Admin Client ID (Optional)"
+              value={value.admin_client_id || ''}
+              onChange={(e) => handleFieldChange('admin_client_id', e.target.value)}
+              disabled={disabled}
+              fullWidth
+              helperText="Power BI Admin Service Principal with Tenant.Read.All"
+              size="small"
+            />
+            <TextField
+              label="Admin Client Secret (Optional)"
+              value={value.admin_client_secret || ''}
+              onChange={(e) => handleFieldChange('admin_client_secret', e.target.value)}
+              disabled={disabled}
+              fullWidth
+              type="password"
+              helperText="Admin Service Principal secret"
+              size="small"
+            />
+          </Box>
         </>
       )}
 

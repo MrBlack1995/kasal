@@ -48,6 +48,10 @@ class UCMetricViewGeneratorSchema(BaseModel):
     auth_method: Optional[str] = Field(None, description="Auth method: 'service_principal', 'service_account', or auto-detect")
     access_token: Optional[str] = Field(None, description="Pre-obtained OAuth access token (alternative to SP/SA)", repr=False)
     pbi_api_base_url: Optional[str] = Field(None, description="Power BI API base URL. Defaults to commercial cloud. Use 'https://api.powerbigov.us/v1.0/myorg' for GCC, 'https://api.powerbi.cn/v1.0/myorg' for China cloud.")
+    admin_client_id: Optional[str] = Field(
+        None, description="[Auth - Admin SP] Service Principal client ID with tenant-admin API access, for the MQuery Admin Scanner retry when client_id lacks admin rights. Distinct from client_id.")
+    admin_client_secret: Optional[str] = Field(
+        None, description="[Auth - Admin SP] Service Principal client secret with tenant-admin API access", repr=False)
 
 
 class UCMetricViewGeneratorTool(BaseTool):
@@ -82,7 +86,8 @@ class UCMetricViewGeneratorTool(BaseTool):
                        'use_llm_fallback', 'translation_mode', 'llm_model', 'llm_workspace_url', 'llm_token',
                        'workspace_id', 'dataset_id', 'tenant_id', 'client_id',
                        'client_secret', 'username', 'password', 'auth_method',
-                       'access_token', 'pbi_api_base_url')
+                       'access_token', 'pbi_api_base_url',
+                       'admin_client_id', 'admin_client_secret')
         default_config = {}
         for key in config_keys:
             val = kwargs.pop(key, None)
@@ -139,16 +144,111 @@ class UCMetricViewGeneratorTool(BaseTool):
         relationships_raw = _get_json('relationships_json')
         scan_raw = _get_json('scan_data_json')
         config_raw = _get_json('config_json') or '{}'
+        # Diagnostic: what arrived via flow injection/kwargs BEFORE any API-mode
+        # extraction or DB fallback runs below, and whether the DB fallback ends
+        # up firing. Carried into `output['_diagnostics']` (not just logged)
+        # because raw log lines aren't reliably queryable in every deployment —
+        # this makes it visible via the same execution_trace pull already used
+        # for Crew 1.
+        _diag: dict = {
+            "preinject_measures_json_chars": len(measures_raw) if isinstance(measures_raw, str) else None,
+            "preinject_mquery_json_chars": len(mquery_raw) if isinstance(mquery_raw, str) else None,
+            "preinject_config_json_chars": len(config_raw) if isinstance(config_raw, str) else None,
+            "db_fallback_fired_for": [],
+            "db_fallback_extraction_id": None,
+        }
         catalog = _get('catalog') or 'main'
         schema = _get('schema_name') or 'default'
         inner_joins = _get('inner_dim_joins') or False
         unflatten = _get('unflatten_tables') or False
 
-        # Check if API extraction mode (PBI credentials provided)
+        # DB fallback: rebuild measures_json/mquery_json/config_json from Crew
+        # 1's powerbi_extraction row for THIS SAME flow execution, whenever flow
+        # injection left them empty. Deliberately runs BEFORE API-mode extraction
+        # below, not after — API-mode extraction is Crew 2's OWN independent
+        # (and materially weaker — no reference-following / parameter-
+        # substitution resolution) re-derivation, and it always fills something
+        # non-empty when workspace_id/dataset_id are configured (as they are for
+        # every report tested so far). With the DB fallback gated on "still
+        # empty" and running AFTER API-mode extraction, it was silently dead
+        # code — API-mode had always already filled the fields with its own
+        # degraded data by the time the check ran. Running the DB fallback
+        # FIRST means Crew 1's higher-quality result is preferred, and API-mode
+        # extraction becomes the true last resort (only fills whatever's still
+        # missing after this).
+        #
+        # NOT a /tmp file — confirmed empirically that Crew 1 and Crew 2 run in
+        # separate subprocesses (a file written by one is invisible to the
+        # other), so a filesystem handoff can never work here regardless of
+        # what gets fixed in it. This goes through Kasal's DB instead (the same
+        # mechanism KasalFlowPersistence's checkpoints use, which does survive
+        # process/container boundaries), and is looked up by execution_id ==
+        # this tool's own job_id — not "most recent row for this dataset" — so
+        # a same-day rerun of the same report can never pull another run's
+        # data. Rebuilds via the exact same PipelineConfigGeneratorTool static
+        # methods Crew 1 itself used, so quality matches (not a degraded
+        # re-derivation): needs admin_tables + expressions (for the
+        # reference-following / parameter-substitution resolution), not just
+        # the raw table list a naive re-extraction would get.
+        if measures_raw == '[]' or mquery_raw == '[]' or config_raw == '{}':
+            _job_id = (getattr(self, 'trace_context', None) or {}).get('job_id')
+            if not _job_id:
+                logger.info("[UCMV] DB fallback: no job_id on trace_context — cannot look up powerbi_extraction")
+            else:
+                try:
+                    async def _load_extraction():
+                        from src.engines.crewai.tools.tool_session_provider import ToolSessionProvider
+                        async with ToolSessionProvider.powerbi_extraction_repo() as repo:
+                            rows = await repo.find_by_execution_id(_job_id)
+                            return rows[0] if rows else None
+
+                    _extraction = _run_async(_load_extraction())
+                    if _extraction is None:
+                        logger.info(f"[UCMV] DB fallback: no powerbi_extraction row found for job_id={_job_id}")
+                    else:
+                        _diag["db_fallback_extraction_id"] = _extraction.id
+                        _db_admin_tables = _extraction.admin_tables or {}
+                        _db_expressions = _extraction.expressions or {}
+                        _db_measures = _extraction.measures or []
+                        _db_config = _extraction.proposed_config or {}
+                        logger.info(
+                            f"[UCMV] DB fallback: found powerbi_extraction id={_extraction.id} for "
+                            f"job_id={_job_id} ({len(_db_admin_tables)} tables, {len(_db_expressions)} expressions)"
+                        )
+                        from src.engines.crewai.tools.custom.pipeline_config_generator_tool import (
+                            PipelineConfigGeneratorTool,
+                        )
+                        if mquery_raw == '[]' and _db_admin_tables:
+                            _rebuilt_mquery = PipelineConfigGeneratorTool._build_ucmv_mquery(
+                                _db_admin_tables, _db_expressions)
+                            if _rebuilt_mquery:
+                                mquery_raw = json.dumps(_rebuilt_mquery)
+                                _diag["db_fallback_fired_for"].append("mquery_json")
+                                logger.info(f"[UCMV] DB fallback: rebuilt mquery_json ({len(_rebuilt_mquery)} tables)")
+                        if measures_raw == '[]' and _db_measures:
+                            _rebuilt_measures = PipelineConfigGeneratorTool._build_ucmv_measures(
+                                _db_measures, admin_tables=_db_admin_tables, config=_db_config)
+                            if _rebuilt_measures:
+                                measures_raw = json.dumps(_rebuilt_measures)
+                                _diag["db_fallback_fired_for"].append("measures_json")
+                                logger.info(f"[UCMV] DB fallback: rebuilt measures_json ({len(_rebuilt_measures)} measures)")
+                        if config_raw == '{}' and _db_config:
+                            config_raw = json.dumps(_db_config)
+                            _diag["db_fallback_fired_for"].append("config_json")
+                except Exception as _db_err:
+                    _diag["db_fallback_error"] = str(_db_err)
+                    logger.warning(f"[UCMV] DB fallback failed: {_db_err}")
+
+        # Check if API extraction mode (PBI credentials provided). Skipped
+        # entirely when the DB fallback above already filled both
+        # measures_json and mquery_json — API-mode's own extraction includes
+        # a live Admin Scanner trigger+poll (up to 5 minutes) that would
+        # otherwise redo, slowly, work Crew 1 already did and this tool just
+        # reused for free.
         workspace_id = _get('workspace_id')
         dataset_id = _get('dataset_id')
 
-        if workspace_id and dataset_id:
+        if workspace_id and dataset_id and (measures_raw == '[]' or mquery_raw == '[]'):
             pbi_api_base_url = _get('pbi_api_base_url') or ''
             valid, err_msg = self._validate_pbi_inputs(workspace_id, dataset_id, pbi_api_base_url)
             if not valid:
@@ -166,6 +266,8 @@ class UCMetricViewGeneratorTool(BaseTool):
                     auth_method=_get('auth_method'),
                     access_token=_get('access_token') or '',
                     pbi_api_base_url=_get('pbi_api_base_url') or '',
+                    admin_client_id=_get('admin_client_id') or '',
+                    admin_client_secret=_get('admin_client_secret') or '',
                 )
                 # Use extracted data (override only when manually provided JSON is empty/default)
                 if extracted.get('measures') and measures_raw == '[]':
@@ -284,12 +386,21 @@ class UCMetricViewGeneratorTool(BaseTool):
             no_summarize_columns=scan_parser.get_no_summarize_columns() or None,
             rls_tables=scan_parser.get_rls_tables() or None,
         )
+        import time as _pipe_time
+        _pipe_t0 = _pipe_time.time()
         pipeline.run()
+        logger.info(f"[UCMV] pipeline.run() completed in {_pipe_time.time() - _pipe_t0:.1f}s")
 
         # Emit YAML + SQL
+        _pipe_t0 = _pipe_time.time()
         yaml_output = pipeline.emit_all_yaml(catalog=catalog, schema=schema)
+        logger.info(f"[UCMV] emit_all_yaml() completed in {_pipe_time.time() - _pipe_t0:.1f}s ({len(yaml_output)} table(s))")
+        _pipe_t0 = _pipe_time.time()
         sql_output = pipeline.emit_all_sql(catalog=catalog, schema=schema)
+        logger.info(f"[UCMV] emit_all_sql() completed in {_pipe_time.time() - _pipe_t0:.1f}s")
+        _pipe_t0 = _pipe_time.time()
         results = pipeline.get_results()
+        logger.info(f"[UCMV] get_results() completed in {_pipe_time.time() - _pipe_t0:.1f}s")
 
         # Run validation (optional — compares DAX structure vs generated SQL)
         validation_results = {}
@@ -302,7 +413,11 @@ class UCMetricViewGeneratorTool(BaseTool):
                 import tempfile  # NOTE: os is already imported at module level; importing it
                 # here too would make `os` a function-local for all of _run() and break the
                 # earlier os.environ.get(...) calls with UnboundLocalError.
-                for table_key, yml in yaml_output.items():
+                import time as _time
+                _val_table_count = len(yaml_output)
+                logger.info(f"[UCMV] Validating {_val_table_count} table(s) (DAX vs generated SQL)")
+                for _val_num, (table_key, yml) in enumerate(yaml_output.items(), start=1):
+                    _val_t0 = _time.time()
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as yf:
                         yf.write(yml)
                         yf_path = yf.name
@@ -326,6 +441,10 @@ class UCMetricViewGeneratorTool(BaseTool):
                     finally:
                         os.unlink(yf_path)
                         os.unlink(mf_path)
+                    logger.info(
+                        f"[UCMV] ({_val_num}/{_val_table_count}) validated table '{table_key}' "
+                        f"in {_time.time() - _val_t0:.1f}s"
+                    )
         except ImportError:
             pass  # Validation package not available
         except Exception as e:
@@ -388,6 +507,7 @@ class UCMetricViewGeneratorTool(BaseTool):
                 }
                 for k, v in results.get('specs', {}).items()
             },
+            '_diagnostics': _diag,
         }
         output_json = json.dumps(output, indent=2)
 
@@ -692,11 +812,22 @@ class UCMetricViewGeneratorTool(BaseTool):
     def _extract_mquery_fallback(
         self, workspace_id, dataset_id, tenant_id, client_id,
         client_secret, username, password,
+        admin_client_id: str = '', admin_client_secret: str = '',
     ) -> list:
         """Recover MQuery/table-source when the Admin Scanner fails for a Service Account.
 
         Tier 1: Fabric TMDL with the SA (works if the workspace is Fabric-enabled).
         Tier 2: Fabric TMDL with a Service Principal (if client_secret provided).
+        Tier 3: retry the Admin Scanner itself with a distinct admin Service
+        Principal (admin_client_id/admin_client_secret), if TMDL also came up
+        empty. Mirrors Pipeline Config Generator's own 3rd tier — some
+        workspaces reject the primary token on the Admin Scanner specifically
+        (tenant-admin API access is commonly gated to a narrower allow-list
+        than ordinary dataset read access) AND aren't Fabric-enabled (TMDL
+        unavailable), so tiers 1+2 both come up empty; a Service Principal
+        with tenant-admin rights is the only thing that recovers MQuery for
+        such a workspace. Distinct from client_id/client_secret on purpose —
+        the two are commonly different app registrations.
         Reuses generate_config so the logic is shared with the config generator.
         """
         try:
@@ -727,6 +858,29 @@ class UCMetricViewGeneratorTool(BaseTool):
                         return entries
             except Exception as e:
                 logger.warning(f"[UCMV] MQuery TMDL fallback ({label}) failed: {e}")
+
+        if admin_client_id and admin_client_secret:
+            try:
+                from src.engines.crewai.tools.custom.powerbi_auth_utils import (
+                    get_powerbi_access_token_from_config,
+                )
+                sp_admin_token = _run_async(get_powerbi_access_token_from_config({
+                    'tenant_id': tenant_id,
+                    'client_id': admin_client_id,
+                    'client_secret': admin_client_secret,
+                    'username': None,
+                    'password': None,
+                    'auth_method': 'service_principal',
+                    'access_token': None,
+                }))
+                scan_result = gen.trigger_admin_scan(sp_admin_token, workspace_id)
+                tables = gen.parse_admin_tables(scan_result, dataset_id=dataset_id)
+                entries = self._tmdl_tables_to_mquery(tables)
+                if entries:
+                    logger.info(f"[UCMV] MQuery Admin Scanner (SP admin retry) recovered {len(entries)} tables")
+                    return entries
+            except Exception as e:
+                logger.warning(f"[UCMV] MQuery Admin Scanner (SP admin retry) failed: {e}")
         return []
 
     def _extract_measures_fallback(
@@ -783,6 +937,8 @@ class UCMetricViewGeneratorTool(BaseTool):
         auth_method: Optional[str],
         access_token: str,
         pbi_api_base_url: str = '',
+        admin_client_id: str = '',
+        admin_client_secret: str = '',
     ) -> dict:
         """Extract measures, MQuery, relationships, and scan data from PBI API.
 
@@ -890,6 +1046,7 @@ class UCMetricViewGeneratorTool(BaseTool):
                 workspace_id=workspace_id, dataset_id=dataset_id,
                 tenant_id=tenant_id, client_id=client_id, client_secret=client_secret,
                 username=username, password=password,
+                admin_client_id=admin_client_id, admin_client_secret=admin_client_secret,
             )
             if recovered_mq:
                 result['mquery'] = recovered_mq

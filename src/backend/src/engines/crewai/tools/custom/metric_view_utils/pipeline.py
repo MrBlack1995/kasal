@@ -207,6 +207,22 @@ class MetricViewPipeline:
                 'original_mquery': raw[:2000],
             }
 
+        # Table processing is sequential and each table's LLM DAX-fallback batch
+        # (table_processor.py) blocks on its own network round-trips — on a
+        # report with many fact tables this can add up past the flow's crew
+        # timeout with NO visible progress in between (those per-measure LLM
+        # calls aren't OTel-traced), which is exactly what made a stalled run
+        # indistinguishable from a slow one. Log wall-clock per table so a
+        # future stall/slowdown is diagnosable directly from these logs.
+        import time as _time
+        _fact_table_count = sum(
+            1 for _, ti in self.mquery_tables.items() if ti.is_fact and ti.source_table
+        )
+        logger.info(
+            "[MetricViewPipeline] Phase 1: processing %d fact table(s) sequentially "
+            "(llm_fallback=%s)", _fact_table_count, bool(self.llm_config.get('use_llm_fallback'))
+        )
+        _table_num = 0
         for table_key, table_info in self.mquery_tables.items():
             if not table_info.is_fact:
                 # Non-fact / raw-M tables: record a classified skip (not a silent
@@ -218,9 +234,15 @@ class MetricViewPipeline:
                 self.stats[table_key] = _skip_stat(table_info)
                 continue
 
+            _table_num += 1
+            _t0 = _time.time()
             dax_measures = measure_groups.get(table_key, [])
             spec = self._process_table(table_key, table_info, dax_measures)
             self.all_specs[table_key] = spec
+            logger.info(
+                "[MetricViewPipeline] (%d/%d) processed table '%s' in %.1fs",
+                _table_num, _fact_table_count, table_key, _time.time() - _t0
+            )
 
         # Handle mapping-only tables (measures in PBI mapping but no MQuery SQL)
         mapping_only_cfg = self.config.get('mapping_only_tables', {})
