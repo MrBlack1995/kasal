@@ -579,6 +579,14 @@ def configure_subprocess_logging(execution_id: str, process_type: str = "crew"):
         'src.engines.crewai.tools.custom.powerbi_metadata_reducer_tool',  # Metadata Reducer tool logs
         'src.engines.crewai.tools.custom.powerbi_semantic_model_fetcher_tool',  # Fetcher tool logs
         'src.engines.crewai.tools.custom.databricks_jobs_tool',  # Add Databricks jobs tool logger
+        'src.engines.crewai.tools.custom.uc_metric_view_generator_tool',  # UCMV Generator tool logs
+        'src.engines.crewai.tools.custom.pipeline_config_generator_tool',  # Pipeline Config Generator tool logs
+        'src.engines.crewai.tools.custom.metric_view_utils',  # UCMV pipeline submodules (pipeline, table_processor,
+                                                                # dax_llm_fallback, mquery_llm_fallback, ...) — a
+                                                                # parent-package entry since none of them set their
+                                                                # own level/handlers, so they propagate up to this one
+        'src.engines.crewai.tools.custom.metric_view_validation_utils',  # per-table DAX-vs-SQL validation pass run
+                                                                # from inside UCMetricViewGeneratorTool._run()
         'src.engines.crewai.paths.crew.task_adapter',  # Task tool resolution logs
         'src.engines.crewai.paths.crew.agent_adapter',  # Agent tool resolution logs
         'src.engines.crewai.security.tool_capability_manifest',  # Trifecta detection warnings
