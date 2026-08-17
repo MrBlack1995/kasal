@@ -189,7 +189,10 @@ async def test_get_name_template_opens_standalone_session_when_none():
     fake_template = MagicMock()
     fake_template.get_template_content = AsyncMock(return_value="TEMPLATE BODY")
 
-    with patch("src.db.session.request_scoped_session", return_value=_fake_session_cm()), \
+    # The standalone read uses async_session_factory (NOT request_scoped_session):
+    # the latter reuses the request-scoped session, which would race an in-flight
+    # request. Patch what the code actually calls.
+    with patch("src.db.session.async_session_factory", return_value=_fake_session_cm()), \
          patch("src.services.template_service.TemplateService", return_value=fake_template):
         out = await svc._get_name_template()
 
@@ -206,7 +209,9 @@ async def test_log_llm_interaction_standalone_commits_when_no_session():
     fake_log = MagicMock()
     fake_log.create_log = AsyncMock()
 
-    with patch("src.db.session.request_scoped_session", return_value=session), \
+    # Standalone write goes through async_session_factory (a PRIVATE session) so it
+    # never joins/contends with an in-flight request transaction.
+    with patch("src.db.session.async_session_factory", return_value=session), \
          patch.object(Svc, "_log_llm_interaction", Svc._log_llm_interaction), \
          patch("src.services.log_service.LLMLogService.create", return_value=fake_log):
         await svc._log_llm_interaction(
@@ -263,3 +268,82 @@ async def test_generate_execution_name_none_session_end_to_end(monkeypatch):
 
     assert out.name == "Cool Run"
     fake_template.get_template_content.assert_awaited_once_with("generate_job_name")
+
+
+@pytest.mark.asyncio
+async def test_standalone_mode_detaches_request_session(monkeypatch):
+    """REGRESSION: in standalone mode (session=None) the service must DETACH the
+    request-scoped session ContextVar before doing any DB/LLM work.
+
+    Name generation runs off a task that inherited the HTTP request's context, so
+    `_request_session` still points at the request session. Without detaching, the
+    nested model-config read inside LLMManager.configure_crewai_llm reuses that
+    shared session and races the in-flight request, raising
+    "This session is provisioning a new connection; concurrent operations are not
+    permitted" — which silently downgraded the run name to a timestamp fallback.
+    """
+    svc = Svc.create(None)
+    fake_template = MagicMock()
+    fake_template.get_template_content = AsyncMock(return_value="SYS TEMPLATE")
+    fake_log = MagicMock()
+    fake_log.create_log = AsyncMock()
+
+    class FakeLLMManager:
+        @staticmethod
+        async def completion(messages, model, temperature=0.7, max_tokens=4000, extra_headers=None):
+            return "Detached Name"
+
+    from src.services import execution_name_service as module
+    monkeypatch.setattr(module, "LLMManager", FakeLLMManager, raising=True)
+
+    detach_calls = []
+    import src.db.session as db_session
+    monkeypatch.setattr(
+        db_session, "detach_request_session", lambda: detach_calls.append(1), raising=True
+    )
+
+    req = ExecutionNameGenerationRequest(
+        model="m", agents_yaml={"a": {"role": "R"}}, tasks_yaml={"t": {"name": "T"}}
+    )
+
+    with patch("src.db.session.async_session_factory", return_value=_fake_session_cm()), \
+         patch("src.services.template_service.TemplateService", return_value=fake_template), \
+         patch("src.services.log_service.LLMLogService.create", return_value=fake_log):
+        out = await svc.generate_execution_name(req)
+
+    assert out.name == "Detached Name"
+    assert detach_calls, "standalone mode must detach the request-scoped session"
+
+
+@pytest.mark.asyncio
+async def test_injected_session_does_not_detach(monkeypatch):
+    """With an INJECTED session the caller owns the transaction — we must NOT
+    detach (that would break the caller's request-scoped participation)."""
+    fake_session = MagicMock()
+    svc = Svc.create(fake_session)
+    fake_template = MagicMock()
+    fake_template.get_template_content = AsyncMock(return_value="SYS TEMPLATE")
+
+    class FakeLLMManager:
+        @staticmethod
+        async def completion(messages, model, temperature=0.7, max_tokens=4000, extra_headers=None):
+            return "Injected Name"
+
+    from src.services import execution_name_service as module
+    monkeypatch.setattr(module, "LLMManager", FakeLLMManager, raising=True)
+    svc.template_service = fake_template
+    svc.log_service = MagicMock(create_log=AsyncMock())
+
+    detach_calls = []
+    import src.db.session as db_session
+    monkeypatch.setattr(
+        db_session, "detach_request_session", lambda: detach_calls.append(1), raising=True
+    )
+
+    req = ExecutionNameGenerationRequest(
+        model="m", agents_yaml={"a": {"role": "R"}}, tasks_yaml={"t": {"name": "T"}}
+    )
+    out = await svc.generate_execution_name(req)
+
+    assert out.name == "Injected Name"
+    assert not detach_calls, "injected-session mode must NOT detach"

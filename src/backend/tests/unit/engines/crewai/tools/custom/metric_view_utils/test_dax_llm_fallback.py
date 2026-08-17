@@ -376,3 +376,40 @@ class TestTableContext:
         asyncio.run(go())
         # different table context → two distinct cache keys → two LLM calls
         assert calls["n"] == 2
+
+
+class TestLLMDeclinedSkipReason:
+    """REGRESSION: when the fast path routes a measure to the LLM and the LLM ALSO
+    declines, skip_reason must report the TERMINAL verdict — not the routing step.
+
+    The fast path sets "routed to LLM (fast-path dropped a DAX component)" to mean
+    "hand this to the LLM". Leaving that text once the LLM has declined reported an
+    intermediate state as final: the Not-transpiled panel and the re-evaluation sweep
+    both claimed the LLM never got a turn, for measures it had already rejected.
+    """
+
+    def test_reason_names_the_llm_and_the_class(self):
+        from src.engines.crewai.tools.custom.metric_view_utils.dax_llm_fallback import (
+            _llm_declined_reason,
+        )
+        out = _llm_declined_reason('unsupported', 'no metric-view equivalent exists')
+        assert 'LLM declined' in out
+        assert 'unsupported' in out
+        # routing text must be gone
+        assert 'routed to LLM' not in out
+
+    def test_known_classes_get_a_human_label(self):
+        from src.engines.crewai.tools.custom.metric_view_utils.dax_llm_fallback import (
+            _llm_declined_reason,
+        )
+        assert 'display/formatting only' in _llm_declined_reason('display_layer', '')
+        assert 'out of scope' in _llm_declined_reason('out_of_scope', '')
+        assert 'source-model change' in _llm_declined_reason('architecture_change', '')
+
+    def test_unknown_class_still_produces_a_sane_reason(self):
+        from src.engines.crewai.tools.custom.metric_view_utils.dax_llm_fallback import (
+            _llm_declined_reason,
+        )
+        out = _llm_declined_reason(None, 'something odd')
+        assert out.startswith('LLM declined')
+        assert 'something odd' in out

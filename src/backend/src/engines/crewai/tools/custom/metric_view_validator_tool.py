@@ -96,6 +96,11 @@ class MetricViewValidatorTool(BaseTool):
             except Exception as _e:
                 logger.debug(f"[Validator] Could not check for saved edits: {_e}")
 
+        # Non-transpiled measures carried through from the UCMV generator so the
+        # validation UI can list WHICH measures were not emitted and why (the
+        # per-table counts alone don't tell a reviewer that). Passed through
+        # untouched — the validator does not evaluate them (they have no SQL).
+        untranslatable_items: list = []
         try:
             # If ucmv_output is provided, extract yaml from it
             if ucmv_raw:
@@ -107,6 +112,9 @@ class MetricViewValidatorTool(BaseTool):
                         pass  # Config Proposer output, not UCMV
                     else:
                         yaml_raw = ucmv_data
+                    _ui = ucmv_data.get('untranslatable_items')
+                    if isinstance(_ui, list):
+                        untranslatable_items = _ui
                 logger.info(f"[Validator] Extracted YAML from ucmv_output: {len(yaml_raw) if isinstance(yaml_raw, dict) else 'str'}")
 
             yaml_tables = json.loads(yaml_raw) if isinstance(yaml_raw, str) else yaml_raw
@@ -123,6 +131,8 @@ class MetricViewValidatorTool(BaseTool):
                     # Full UCMV output — extract yaml and keep the rest for validation
                     yaml_tables = _db_result['yaml']
                     ucmv_raw = json.dumps(_db_result)  # Store full output for built-in validation
+                    if not untranslatable_items and isinstance(_db_result.get('untranslatable_items'), list):
+                        untranslatable_items = _db_result['untranslatable_items']
                     logger.info(f"[Validator] Fetched full UCMV output from DB: {len(yaml_tables)} tables")
                 elif isinstance(_db_result, dict):
                     yaml_tables = _db_result
@@ -408,6 +418,10 @@ class MetricViewValidatorTool(BaseTool):
             # `per_table_summary` counts represent them). Full per-measure detail
             # remains queryable in the execution trace.
             "yaml": yaml_tables,
+            # Non-transpiled measures (passed through from the UCMV generator, not
+            # evaluated here — they have no SQL). Lets the validation UI list WHICH
+            # measures were not emitted + why, next to the per-table quality counts.
+            "untranslatable_items": untranslatable_items,
             "full_detail_in_trace": True,
         }
 

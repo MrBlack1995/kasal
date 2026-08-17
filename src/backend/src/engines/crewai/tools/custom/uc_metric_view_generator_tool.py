@@ -492,6 +492,42 @@ class UCMetricViewGeneratorTool(BaseTool):
         # regardless of whether the transpilation pipeline succeeded.
         fallback_extract = self._build_fallback_extract(measures, mquery_entries)
 
+        # ── Opt-in best-effort views for a THIN-REPORT model ────────────────
+        # When the normal path produced 0 views AND the user opted in
+        # (allow_best_effort) AND supplied physical sources (fact_source_map),
+        # draft thin UCMVs from measures that already resolved to real SQL. This
+        # is the fallback-of-the-fallback — the preferred fix is to convert the
+        # upstream semantic model (see thin-report-and-source-resolution.md). The
+        # coverage_report makes the gap explicit (tables/measures skipped), and
+        # every drafted measure is flagged TODO: verify.
+        # When nothing generated, always compute an actionable diagnosis of WHY
+        # (thin report? no source? unresolvable DAX?) so the run is never a silent
+        # empty result. Computed before best-effort so it reflects the real state.
+        zero_view_diagnosis = None
+        if not yaml_output:
+            zero_view_diagnosis = self._diagnose_zero_views(mquery_entries, measures, config)
+            logger.warning(
+                f"[UCMVGenerator] 0 views — {zero_view_diagnosis['case']}: "
+                f"{zero_view_diagnosis['recommended_action']}")
+
+        best_effort_report = None
+        if (not yaml_output) and _get('allow_best_effort') and _get('fact_source_map'):
+            fsm = _get('fact_source_map')
+            if isinstance(fsm, str):
+                try:
+                    fsm = json.loads(fsm)
+                except Exception:
+                    fsm = None
+            be_views, best_effort_report = self._build_best_effort_views(
+                fact_source_map=fsm, config=config, measures=measures)
+            if be_views:
+                yaml_output = be_views
+                logger.warning(
+                    f"[UCMVGenerator] BEST-EFFORT mode: drafted {best_effort_report['tables_emitted']} "
+                    f"view(s) / {best_effort_report['measures_emitted']} measure(s) from a thin report; "
+                    f"{best_effort_report['measures_skipped_unresolved']} measure(s) unresolved and skipped. "
+                    f"Tables/measures may be MISSING — every measure marked TODO: verify.")
+
         output = {
             'yaml': yaml_output,
             'sql': sql_output,
@@ -505,7 +541,17 @@ class UCMetricViewGeneratorTool(BaseTool):
             # Always present; the UI shows it as a tabular reference and falls back
             # to it as the primary artifact when `yaml` is empty (0 views).
             'fallback_extract': fallback_extract,
+            # Present only when best-effort mode fired: surfaces the coverage gap
+            # (skipped tables/measures) so the UI/consumer can warn "may be missing".
+            'best_effort_report': best_effort_report,
+            # Present when 0 views generated: actionable "why + what to do" so a
+            # thin-report run is never a silent empty result.
+            'zero_view_diagnosis': zero_view_diagnosis,
             'views_generated': len(yaml_output) if isinstance(yaml_output, dict) else 0,
+            # Flattened non-transpiled measures for the validation-UI review panel
+            # (full DAX + reason + category + dependency count). Additive; [] when
+            # everything translated.
+            'untranslatable_items': self._build_untranslatable_items(results.get('specs', {})),
             'specs_summary': {
                 k: {
                     'view_name': v.get('view_name'),
@@ -545,6 +591,7 @@ class UCMetricViewGeneratorTool(BaseTool):
                 dataset_id=_get('dataset_id'),
                 catalog=catalog,
                 schema=schema,
+                untranslatable_items=output.get('untranslatable_items') or [],
             ))
         except Exception as _hist_err:
             logger.warning(f"[UCMVGenerator] conversion_history persistence skipped: {_hist_err}")
@@ -577,6 +624,36 @@ class UCMetricViewGeneratorTool(BaseTool):
                 'proposed_allocation': m.get('proposed_allocation') or '',
             })
         return extract
+
+    @staticmethod
+    def _build_untranslatable_items(specs: dict) -> list:
+        """Flatten every spec's untranslatable measures into one UI-ready list.
+
+        Feeds the validation-UI "Not transpiled" review panel: reviewers see the
+        non-emitted measures as first-class rows (original DAX + why skipped +
+        category + dependency in-degree) instead of digging through the YAML
+        `-- comment` block. Additive — does not change any existing output field.
+        Each row is keyed by (table_key, original_name) on the frontend so review
+        annotations round-trip via the persisted result. Returns [] when nothing
+        was skipped.
+        """
+        items: list = []
+        for table_key, spec in (specs or {}).items():
+            view_name = spec.get('view_name')
+            for m in spec.get('untranslatable', []) or []:
+                items.append({
+                    'table_key': table_key,
+                    'view_name': view_name,
+                    'original_name': m.get('original_name') or m.get('name'),
+                    'dax_expression': m.get('dax_expression', ''),
+                    'skip_reason': m.get('skip_reason', ''),
+                    'category': m.get('category', ''),
+                    'dax_class': m.get('dax_class'),
+                    'referenced_by': m.get('referenced_by', 0),
+                })
+        # High-impact gaps first (most-depended-on measures at the top).
+        items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)
+        return items
 
     @staticmethod
     def _build_fallback_extract(measures: Any, mquery_entries: Any) -> list:
@@ -638,6 +715,194 @@ class UCMetricViewGeneratorTool(BaseTool):
             r['has_mquery'] = bool(r['mquery'])
         return rows
 
+    @staticmethod
+    def _diagnose_zero_views(
+        mquery_entries: Any,
+        measures: Any,
+        config: Any,
+    ) -> dict:
+        """Explain WHY 0 UC Metric Views were generated, and what to do about it.
+
+        Today a thin-report model silently yields a fallback JSON and no views, with
+        no signal to the user about the cause or fix. This turns that into an
+        actionable diagnosis (the real, testable part of the "source not auto-
+        resolved" problem). It classifies the run by two deterministic signals:
+          * source tables present?  → any mquery entry with real transpiled SQL /
+            an M source expression (not raw/empty).
+          * measures resolvable?    → any config.measure_resolutions with real
+            aggregatable SQL (not TODO).
+
+        Returns {case, reason, recommended_action, signals} — see the customer guide
+        thin-report-and-source-resolution.md for the three cases.
+        """
+        # Signal 1: do we have any real source table?
+        has_source = False
+        if isinstance(mquery_entries, list):
+            for e in mquery_entries:
+                if not isinstance(e, dict):
+                    continue
+                sql = (e.get('transpiled_sql') or e.get('mquery_expression') or '').strip()
+                if sql and sql not in ('{}', 'null'):
+                    has_source = True
+                    break
+
+        # Signal 2: any measure that resolved to real aggregatable SQL?
+        resolvable = 0
+        _AGG = ('SUM', 'COUNT', 'AVG', 'MIN', 'MAX', 'DIVIDE', 'CALCULATE', 'SUMX', 'COUNTX')
+        resolutions = (config or {}).get('measure_resolutions', {}) if isinstance(config, dict) else {}
+        for res in (resolutions or {}).values():
+            base = (res or {}).get('base_expr', '') if isinstance(res, dict) else ''
+            if base and not base.strip().upper().startswith('TODO') \
+                    and base.strip().upper().startswith(_AGG):
+                resolvable += 1
+
+        n_measures = len(measures) if isinstance(measures, list) else 0
+        signals = {
+            'has_source_tables': has_source,
+            'resolvable_measures': resolvable,
+            'total_measures': n_measures,
+        }
+
+        if has_source:
+            # Sources exist but still 0 views — a translation/allocation issue, not
+            # a thin-report problem. Leave it to the normal migration report.
+            return {
+                'case': 'sources_present_no_views',
+                'reason': ('Source tables were found but no metric view was emitted — '
+                           'likely all measures were untranslatable DAX. See the '
+                           'migration report / not-emitted notes.'),
+                'recommended_action': 'Review the not-emitted measures; no source mapping needed.',
+                'signals': signals,
+            }
+        # No source tables → thin report (case B) or hand-entered (case C).
+        if resolvable > 0:
+            action = (f"This looks like a THIN REPORT on an upstream semantic model — its "
+                      f"source tables are not in what was extracted. PREFERRED: re-run "
+                      f"against the upstream model's dataset_id (see Power BI lineage). "
+                      f"OR: enable allow_best_effort and supply fact_source_map to draft "
+                      f"views for the {resolvable} resolvable measure(s) — tables/measures "
+                      f"may be missing. See thin-report-and-source-resolution.md.")
+        else:
+            action = ("This looks like a THIN REPORT (or a report-logic-only model): no "
+                      "source tables AND no measures reduce to a table aggregate (mostly "
+                      "selector / measure-on-measure DAX). Re-run against the upstream "
+                      "semantic model's dataset_id if one exists; otherwise these measures "
+                      "cannot be converted to metric views. See "
+                      "thin-report-and-source-resolution.md.")
+        return {
+            'case': 'thin_report_no_source_tables',
+            'reason': ('No source tables (M-Queries) were found in the extracted model, so '
+                       'there is no physical table to build a UC Metric View on.'),
+            'recommended_action': action,
+            'signals': signals,
+        }
+
+    @staticmethod
+    def _build_best_effort_views(
+        fact_source_map: Any,
+        config: Any,
+        measures: Any,
+    ) -> tuple[dict, dict]:
+        """Best-effort UCMVs for a THIN-REPORT model (no M-Query source tables).
+
+        Opt-in fallback used ONLY when the normal path produced 0 views AND the
+        human supplied `fact_source_map` (PBI table -> physical catalog.schema.table).
+        See docs/powerbi/thin-report-and-source-resolution.md — the PREFERRED fix is
+        to point Kasal at the upstream semantic model; this is for when that model is
+        unreachable.
+
+        Emits one thin metric view per supplied source, containing only measures that
+        ALREADY resolved to real aggregatable SQL in `config['measure_resolutions']`
+        (reusing the pipeline's own base_expr + base_filters). It NEVER fabricates SQL:
+        - measures with a `TODO`/empty resolution are skipped (documented, not emitted);
+        - tables not in `fact_source_map` are skipped;
+        so the "never emit silently-wrong SQL" contract holds.
+
+        Every emitted measure is flagged `TODO: verify` because it is a DRAFT produced
+        without a validated transpiled source. Returns (views, coverage_report) where
+        coverage_report makes the GAP explicit — tables/measures that were skipped.
+        """
+        views: dict = {}
+        report = {
+            'mode': 'best_effort',
+            'warning': ('DRAFT views built from a thin report without validated source '
+                        'tables. Tables/measures may be MISSING; every emitted measure '
+                        'is marked "TODO: verify". Prefer converting the upstream '
+                        'semantic model — see thin-report-and-source-resolution.md.'),
+            'sources_supplied': 0,
+            'tables_emitted': 0,
+            'measures_emitted': 0,
+            'measures_skipped_unresolved': 0,
+            'tables_without_source': [],
+            'skipped_measures': [],
+        }
+        if not isinstance(fact_source_map, dict) or not fact_source_map:
+            return views, report
+        resolutions = (config or {}).get('measure_resolutions', {}) if isinstance(config, dict) else {}
+        report['sources_supplied'] = len(fact_source_map)
+
+        _AGG = ('SUM', 'COUNT', 'AVG', 'MIN', 'MAX', 'DIVIDE', 'CALCULATE', 'SUMX', 'COUNTX')
+
+        def _to_snake(name: str) -> str:
+            import re as _re
+            s = _re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).strip('_').lower()
+            return s or 'measure'
+
+        def _alloc(m: dict) -> str:
+            return (m.get('proposed_allocation') or m.get('table_name')
+                    or m.get('table') or '__unassigned__')
+
+        # measure name -> its allocated PBI table (from the measures list)
+        measure_table = {}
+        if isinstance(measures, list):
+            for m in measures:
+                if isinstance(m, dict):
+                    nm = m.get('measure_name') or m.get('original_name') or ''
+                    if nm:
+                        measure_table[nm] = _alloc(m)
+
+        # group RESOLVED measures by their allocated PBI table
+        by_table: dict[str, list] = {}
+        for mname, res in (resolutions or {}).items():
+            base = (res or {}).get('base_expr', '') if isinstance(res, dict) else ''
+            if (not base) or base.strip().upper().startswith('TODO') \
+                    or not base.strip().upper().startswith(_AGG):
+                report['measures_skipped_unresolved'] += 1
+                report['skipped_measures'].append(mname)
+                continue
+            by_table.setdefault(measure_table.get(mname, '__unassigned__'), []).append((mname, res))
+
+        for pbi_table, source in fact_source_map.items():
+            rows = by_table.get(pbi_table, [])
+            if not rows:
+                report['tables_without_source'].append(pbi_table)
+                continue
+            measures_out = []
+            for mname, res in rows:
+                expr = res['base_expr']
+                filters = res.get('base_filters') or []
+                if filters:
+                    expr = f"{expr} FILTER (WHERE {' AND '.join(filters)})"
+                measures_out.append({
+                    'name': _to_snake(mname),
+                    'expr': expr,
+                    'comment': (f"BEST-EFFORT DRAFT — no validated source. TODO: verify. "
+                                f"From DAX '{mname}'."),
+                })
+            views[pbi_table] = {
+                'version': '1.1',
+                'source': source,
+                'comment': (f"BEST-EFFORT UC Metric View (thin-report model). "
+                            f"{len(measures_out)} measures drafted from resolved SQL; "
+                            f"NOT validated against a transpiled source. Review before "
+                            f"deploy. Some measures/tables from the original model may "
+                            f"be MISSING."),
+                'measures': measures_out,
+            }
+            report['tables_emitted'] += 1
+            report['measures_emitted'] += len(measures_out)
+        return views, report
+
     async def _save_dax_to_conversion_history(
         self,
         raw_dax: list,
@@ -647,6 +912,7 @@ class UCMetricViewGeneratorTool(BaseTool):
         dataset_id: Optional[str],
         catalog: Optional[str],
         schema: Optional[str],
+        untranslatable_items: Optional[list] = None,
     ) -> None:
         """Persist the full raw DAX extract to conversion_history (fail-open).
 
@@ -656,7 +922,23 @@ class UCMetricViewGeneratorTool(BaseTool):
         ``source_format=powerbi_dax`` / ``execution_id``) or
         ``GET /conversion-history/{id}``. Any failure here is non-fatal — it must
         never break the generation itself.
+
+        Also records the non-transpiled measures plus the transpiler's CAPABILITY
+        FINGERPRINT. That pair is what makes re-evaluation possible: a later sweep
+        can ask "has the transpiler changed since this run, and which measures did
+        it fail on?" without re-hitting the PowerBI API. See
+        src/docs/powerbi/ucmv-reevaluation-recoverable-measures.md.
         """
+        def _capability_fp() -> str:
+            """Current transpiler capability fingerprint (fail-open)."""
+            try:
+                from src.engines.crewai.tools.custom.metric_view_utils.capability_version import (
+                    capability_fingerprint,
+                )
+                return capability_fingerprint()
+            except Exception:
+                return "unknown"
+
         try:
             from src.engines.crewai.tools.tool_session_provider import ToolSessionProvider
             from src.schemas.conversion import ConversionHistoryCreate
@@ -688,6 +970,9 @@ class UCMetricViewGeneratorTool(BaseTool):
                     "sql": sql_output,
                     "catalog": catalog,
                     "schema": schema,
+                    # Re-evaluation inputs: WHICH measures failed, and at WHAT
+                    # capability level. A later sweep re-tries only these.
+                    "untranslatable_items": untranslatable_items or [],
                 },
                 output_summary=(
                     f"Generated {view_count} UC metric view(s)"
@@ -698,6 +983,10 @@ class UCMetricViewGeneratorTool(BaseTool):
                     "dataset_id": dataset_id,
                     "catalog": catalog,
                     "schema": schema,
+                    # Capability level that produced this result. Re-evaluation
+                    # compares it against the current fingerprint to decide whether a
+                    # retry can possibly gain anything.
+                    "capability_fingerprint": _capability_fp(),
                 },
                 status="success",
                 measure_count=measure_count,

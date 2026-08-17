@@ -33,6 +33,8 @@ import {
   Tooltip,
   Alert,
   Snackbar,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import StorageIcon from '@mui/icons-material/Storage';
@@ -48,6 +50,7 @@ import UndoIcon from '@mui/icons-material/Undo';
 import DownloadIcon from '@mui/icons-material/Download';
 import SaveIcon from '@mui/icons-material/Save';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import ReportProblemOutlinedIcon from '@mui/icons-material/ReportProblemOutlined';
 import Button from '@mui/material/Button';
 import { Highlight, themes } from 'prism-react-renderer';
 import yaml from 'js-yaml';
@@ -90,6 +93,12 @@ export interface UCMVResult {
   fallback_extract?: FallbackExtractRow[];
   /** Number of UC metric views actually generated (0 → show the fallback table). */
   views_generated?: number;
+  /** Non-transpiled measures (DAX that could not be translated), flattened across
+   *  all specs, for the "Not transpiled" review panel. */
+  untranslatable_items?: UntranslatableItem[];
+  /** Reviewer annotations on non-transpiled items, keyed by `${table_key}::${original_name}`.
+   *  Persisted inside the result blob via the same save path as YAML edits. */
+  untranslatable_review?: Record<string, ReviewAnnotation>;
 }
 
 export interface FallbackExtractRow {
@@ -99,6 +108,39 @@ export interface FallbackExtractRow {
   measure_count: number;
   has_mquery: boolean;
 }
+
+/** One non-transpiled measure surfaced for review (mirrors the backend
+ *  `untranslatable_items` row from uc_metric_view_generator_tool). */
+export interface UntranslatableItem {
+  table_key: string;
+  view_name?: string;
+  original_name: string;
+  dax_expression: string;
+  skip_reason: string;
+  category: string;
+  dax_class?: string | null;
+  referenced_by: number;
+}
+
+/** Triage status a reviewer can assign to a non-transpiled item. */
+export type ReviewStatus = 'todo' | 'wont_fix' | 'hand_written' | 'needs_info';
+
+export interface ReviewAnnotation {
+  status?: ReviewStatus;
+  note?: string;
+}
+
+/** Stable per-item key for the review annotation map. */
+export const untranslatableKey = (item: { table_key: string; original_name: string }): string =>
+  `${item.table_key}::${item.original_name}`;
+
+/** Human labels + colors for the review status dropdown. */
+export const REVIEW_STATUS_OPTIONS: Array<{ value: ReviewStatus; label: string }> = [
+  { value: 'todo', label: 'To translate' },
+  { value: 'hand_written', label: 'Hand-written' },
+  { value: 'wont_fix', label: 'Not needed' },
+  { value: 'needs_info', label: 'Needs info' },
+];
 
 interface UCMVResultViewerProps {
   result: UCMVResult;
@@ -233,6 +275,143 @@ const FieldTable: React.FC<{
 };
 
 /* ------------------------------------------------------------------ */
+/*  Non-transpiled review panel                                        */
+/* ------------------------------------------------------------------ */
+
+/** Interactive review table for measures that were NOT transpiled (they land as
+ *  `-- comment` lines in the UCMV YAML). Reviewers see the original DAX + why it
+ *  was skipped, and can triage each with a status + free-text note. Read-only for
+ *  DAX/reason; Status/Note are editable and flow up via `onReviewChange`. */
+const NonTranspiledPanel: React.FC<{
+  items: UntranslatableItem[];
+  review: Record<string, ReviewAnnotation>;
+  editable: boolean;
+  onReviewChange: (key: string, patch: Partial<ReviewAnnotation>) => void;
+}> = ({ items, review, editable, onReviewChange }) => {
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+
+  // Distinct categories for the filter chip row.
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((i) => i.category && set.add(i.category));
+    return Array.from(set).sort();
+  }, [items]);
+
+  // Sort by impact (referenced_by desc), then filter.
+  const rows = useMemo(() => {
+    const sorted = [...items].sort((a, b) => (b.referenced_by ?? 0) - (a.referenced_by ?? 0));
+    return categoryFilter ? sorted.filter((i) => i.category === categoryFilter) : sorted;
+  }, [items, categoryFilter]);
+
+  return (
+    <Box>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        These measures could not be transpiled and are not emitted as UC metric-view
+        measures (they appear as comments in the YAML). Review each and mark how it
+        should be handled.
+      </Typography>
+
+      {categories.length > 1 && (
+        <Box display="flex" gap={0.5} flexWrap="wrap" sx={{ mb: 1 }}>
+          <Chip
+            size="small"
+            label={`All (${items.length})`}
+            color={categoryFilter === null ? 'primary' : 'default'}
+            variant={categoryFilter === null ? 'filled' : 'outlined'}
+            onClick={() => setCategoryFilter(null)}
+          />
+          {categories.map((c) => (
+            <Chip
+              key={c}
+              size="small"
+              label={`${c} (${items.filter((i) => i.category === c).length})`}
+              color={categoryFilter === c ? 'primary' : 'default'}
+              variant={categoryFilter === c ? 'filled' : 'outlined'}
+              onClick={() => setCategoryFilter(c)}
+            />
+          ))}
+        </Box>
+      )}
+
+      <Table size="small" sx={{ tableLayout: 'fixed' }}>
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ fontWeight: 600, width: '18%' }}>Measure</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '30%' }}>DAX</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '18%' }}>Reason</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '6%' }} align="right" title="How many other measures reference this one">Used by</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '13%' }}>Status</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '15%' }}>Note</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {rows.map((item) => {
+            const key = untranslatableKey(item);
+            const ann = review[key] || {};
+            return (
+              <TableRow key={key} hover>
+                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-word' }}>
+                  {item.original_name}
+                </TableCell>
+                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.75rem', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+                  {item.dax_expression || '—'}
+                </TableCell>
+                <TableCell sx={{ fontSize: '0.75rem', wordBreak: 'break-word' }}>
+                  {item.category ? <Chip size="small" label={item.category} variant="outlined" color="warning" /> : null}
+                  {item.skip_reason && (
+                    <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.5 }}>
+                      {item.skip_reason}
+                    </Typography>
+                  )}
+                </TableCell>
+                <TableCell sx={{ fontSize: '0.8rem' }} align="right">
+                  {item.referenced_by > 0 ? item.referenced_by : '—'}
+                </TableCell>
+                <TableCell>
+                  <Select
+                    size="small"
+                    fullWidth
+                    displayEmpty
+                    disabled={!editable}
+                    value={ann.status ?? ''}
+                    onChange={(e) =>
+                      onReviewChange(key, { status: (e.target.value || undefined) as ReviewStatus | undefined })
+                    }
+                    sx={{ fontSize: '0.75rem' }}
+                    renderValue={(v) =>
+                      v ? (REVIEW_STATUS_OPTIONS.find((o) => o.value === v)?.label ?? String(v)) : '—'
+                    }
+                  >
+                    <MenuItem value=""><em>—</em></MenuItem>
+                    {REVIEW_STATUS_OPTIONS.map((o) => (
+                      <MenuItem key={o.value} value={o.value} sx={{ fontSize: '0.8rem' }}>
+                        {o.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    variant="standard"
+                    placeholder="Add note…"
+                    disabled={!editable}
+                    value={ann.note ?? ''}
+                    onChange={(e) => onReviewChange(key, { note: e.target.value })}
+                    InputProps={{ sx: { fontSize: '0.75rem' } }}
+                  />
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </Box>
+  );
+};
+
+/* ------------------------------------------------------------------ */
 /*  Joins table                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -340,6 +519,20 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
   const [yamlErrors, setYamlErrors] = useState<Record<string, string>>({});
   // Track which views have been removed
   const [removedViews, setRemovedViews] = useState<Set<string>>(new Set());
+  // Reviewer annotations on non-transpiled items (seeded from the persisted result).
+  const [reviewAnnotations, setReviewAnnotations] = useState<Record<string, ReviewAnnotation>>(
+    () => result.untranslatable_review ?? {},
+  );
+  const untranslatableItems = useMemo<UntranslatableItem[]>(
+    () => (Array.isArray(result.untranslatable_items) ? result.untranslatable_items : []),
+    [result.untranslatable_items],
+  );
+  // Non-transpiled items belonging to the currently-selected view (matched by
+  // table_key or view_name — the sidebar selection is a view name/key).
+  const selectedUntranslatable = useMemo<UntranslatableItem[]>(
+    () => untranslatableItems.filter((i) => i.table_key === selected || i.view_name === selected),
+    [untranslatableItems, selected],
+  );
   // Save state
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -390,9 +583,14 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
 
   // Build the current full result (with edits applied) for parent
   const buildEditedResult = useCallback(
-    (overrides?: { yamlEdits?: Record<string, string>; removed?: Set<string> }): UCMVResult => {
+    (overrides?: {
+      yamlEdits?: Record<string, string>;
+      removed?: Set<string>;
+      reviewEdits?: Record<string, ReviewAnnotation>;
+    }): UCMVResult => {
       const edits = overrides?.yamlEdits ?? editingYaml;
       const removed = overrides?.removed ?? removedViews;
+      const review = overrides?.reviewEdits ?? reviewAnnotations;
       const newYaml: Record<string, string> = {};
       const newSql: Record<string, string> = {};
       const newStats: Record<string, UCMVStats> = {};
@@ -403,9 +601,25 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
         const s = result.stats as Record<string, UCMVStats>;
         if (s[name]) newStats[name] = s[name];
       }
-      return { ...result, yaml: newYaml, sql: newSql, stats: newStats };
+      // Fold reviewer annotations into the persisted result (round-trips via the
+      // same save path as YAML edits). Only keep non-empty annotations.
+      const untranslatable_review: Record<string, ReviewAnnotation> = {};
+      for (const [k, v] of Object.entries(review)) {
+        if (v && (v.status || (v.note && v.note.trim()))) untranslatable_review[k] = v;
+      }
+      return { ...result, yaml: newYaml, sql: newSql, stats: newStats, untranslatable_review };
     },
-    [editingYaml, removedViews, viewNames, result]
+    [editingYaml, removedViews, reviewAnnotations, viewNames, result]
+  );
+
+  // Update a reviewer annotation on a non-transpiled item; propagate upward.
+  const handleReviewChange = useCallback(
+    (key: string, patch: Partial<ReviewAnnotation>) => {
+      const next = { ...reviewAnnotations, [key]: { ...reviewAnnotations[key], ...patch } };
+      setReviewAnnotations(next);
+      onResultChange?.(buildEditedResult({ reviewEdits: next }));
+    },
+    [reviewAnnotations, buildEditedResult, onResultChange]
   );
 
   // Start editing a view
@@ -471,7 +685,18 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
   };
 
   const isEditing = selected in editingYaml;
-  const hasEdits = Object.keys(editingYaml).length > 0 || removedViews.size > 0;
+  // Review annotations count as edits too (they persist via the same save path).
+  const reviewDirty = useMemo(() => {
+    const norm = (r: Record<string, ReviewAnnotation>) => {
+      const out: Record<string, ReviewAnnotation> = {};
+      for (const [k, v] of Object.entries(r || {})) {
+        if (v && (v.status || (v.note && v.note.trim()))) out[k] = v;
+      }
+      return JSON.stringify(out);
+    };
+    return norm(reviewAnnotations) !== norm(result.untranslatable_review ?? {});
+  }, [reviewAnnotations, result.untranslatable_review]);
+  const hasEdits = Object.keys(editingYaml).length > 0 || removedViews.size > 0 || reviewDirty;
 
   const handleSave = useCallback(async () => {
     if (!onSave) return;
@@ -565,6 +790,15 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
         <Chip size="small" label={`${aggregateStats.activeViews} views`} />
         <Chip size="small" label={`${aggregateStats.totalMeasures} measures`} variant="outlined" />
         <Chip size="small" label={`${aggregateStats.totalDims} dimensions`} variant="outlined" />
+        {untranslatableItems.length > 0 && (
+          <Chip
+            size="small"
+            label={`${untranslatableItems.length} not transpiled`}
+            color="warning"
+            variant="outlined"
+            icon={<ReportProblemOutlinedIcon />}
+          />
+        )}
         {editable && hasEdits && (
           <Chip size="small" label="edited" color="warning" variant="filled" />
         )}
@@ -837,6 +1071,24 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
               defaultExpanded
             >
               <FieldTable fields={parsed.measures} showFormat />
+            </Section>
+          )}
+
+          {/* Not transpiled — non-emitted measures for review + annotation */}
+          {selectedUntranslatable.length > 0 && (
+            <Section
+              title="Not transpiled"
+              icon={<ReportProblemOutlinedIcon fontSize="small" color="warning" />}
+              count={selectedUntranslatable.length}
+            >
+              <Box sx={{ p: 1.5 }}>
+                <NonTranspiledPanel
+                  items={selectedUntranslatable}
+                  review={reviewAnnotations}
+                  editable={editable}
+                  onReviewChange={handleReviewChange}
+                />
+              </Box>
             </Section>
           )}
 
