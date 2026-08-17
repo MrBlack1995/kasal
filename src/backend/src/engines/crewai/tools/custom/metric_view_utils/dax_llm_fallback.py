@@ -88,6 +88,24 @@ Rules:
 8. If the expression CANNOT be translated to UC Metric View SQL, return success=false.
 9. Use snake_case for measure names."""
 
+# High-signal SQL rules, appended to BOTH the single and batch output contracts
+# (the short tail of the system prompt, sent every call). The full rationale +
+# examples live in the skill corpus (dax/PATTERNS.md §0), but the corpus is large
+# and a rule there can get diluted — these two are the ones that were violated in
+# practice, so we restate them where the model is most likely to attend to them.
+_SQL_RULES = """
+
+CRITICAL SQL rules for every "sql_expr" (see skill corpus §0 for detail):
+1. Qualify EVERY source column as source.<col> — including inside FILTER (WHERE ...)
+   and CASE WHEN predicates. (Unqualified defaults to source, but always write the
+   explicit source. prefix.)
+2. SINGLE-SOURCE only: never SELECT FROM another table in a subquery — no
+   "... IN (SELECT ... FROM other_table)", no "... = (SELECT ... FROM other_table)".
+   Only source and declared join aliases are valid namespaces. If a measure needs a
+   table that is neither source nor a declared join, set success=false with
+   dax_class="architecture_change" and explain the source-view change needed — do
+   NOT fabricate a cross-table subquery."""
+
 # The JSON output contract (shared by corpus + fallback prompts). Adds the
 # 7-category `dax_class` provenance label alongside the existing fields.
 _OUTPUT_CONTRACT = """
@@ -108,7 +126,7 @@ ALWAYS respond with valid JSON (no markdown code blocks):
   "confidence": "high"/"medium"/"low",
   "explanation": "brief explanation of the translation",
   "error": "reason if success=false" or null
-}"""
+}""" + _SQL_RULES
 
 # Corpus-backed system prompt when skills are vendored; terse otherwise. The
 # corpus is the STABLE prefix that gets cache_control:ephemeral at call time.
@@ -149,7 +167,7 @@ you were given:
   }
 ]
 Include EVERY measure exactly once. Do not merge, skip, or invent measures.
-Classify each into exactly one dax_class (same definitions as above)."""
+Classify each into exactly one dax_class (same definitions as above).""" + _SQL_RULES
 
 # Corpus-backed batch system prompt (corpus sent ONCE per batch call).
 if _SKILL_CORPUS:

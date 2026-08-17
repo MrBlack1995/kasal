@@ -2,6 +2,43 @@
 
 Each entry shows the DAX pattern, its UC metric view equivalent, and migration notes.
 
+## 0. Output Conventions (MUST follow for EVERY `sql_expr`)
+
+These apply on top of the per-pattern notes below.
+
+### 0.1 Qualify source columns with `source.` — including inside FILTER
+
+Write source-table columns as `source.<col>` **everywhere they appear**, including
+inside `FILTER (WHERE ...)` clauses and `CASE WHEN` predicates. Unqualified names
+are technically valid (they default to `source`), but this pipeline standardises
+on the explicit `source.` prefix for consistency and review.
+
+```
+DAX:  CALCULATE(COUNTROWS(fact), fact[check_status] = 0)
+SQL:  COUNT(1) FILTER (WHERE source.check_status = 0)     -- ✅ source. in FILTER
+NOT:  COUNT(1) FILTER (WHERE check_status = 0)            -- ❌ unqualified
+```
+
+Columns from a **declared join** use that join's name (`<join_name>.<col>`, see
+§7). Backtick names with spaces/punctuation: `` source.`Check Status` ``.
+
+### 0.2 A metric view is SINGLE-SOURCE — never emit cross-table subqueries
+
+The only valid column namespaces are `source` and the **declared join names**.
+Do **not** emit a subquery that selects `FROM` another table, e.g.
+`... IN (SELECT key FROM tech_rules_exceptions)` or
+`... = (SELECT MAX(week_445_sequential) FROM param_calendar445)`. Such SQL
+references a table that is neither `source` nor a declared join and will not
+deploy.
+
+If a measure genuinely needs a table that is neither `source` nor a declared
+join — e.g. a separate calendar for a max-date / time-intelligence lookup, or an
+exceptions list for a `NOT IN` filter — it is **not expressible as-is**. Return
+`success=false` with `dax_class="architecture_change"` and say what the source
+view would need (e.g. "precompute max_available_date per week grain as a column",
+"materialise the exceptions flag on the fact"). Never fabricate a cross-table
+subquery to force a translation.
+
 ## 1. Direct Aggregations (Leaf Measures)
 
 ### SUM
