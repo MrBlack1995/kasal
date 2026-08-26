@@ -22,6 +22,10 @@ class TranslationResult:
     # Distinct from `category`, which drives yaml_emitter output routing — never
     # overload category with this. Reporting/telemetry only.
     dax_class: str | None = None
+    # The LLM's one-line justification for the translation (or the decline
+    # reason). Surfaced as a provenance comment on the emitted measure so a
+    # reviewer sees HOW/WHY each best-effort measure was produced. Reporting only.
+    explanation: str | None = None
     # How many OTHER measures reference this one (DAX dependency in-degree).
     # Surfaced on TODOs + the UCMV overview so reviewers prioritize high-impact
     # gaps. Populated from config['measure_usage']; measure→measure refs only

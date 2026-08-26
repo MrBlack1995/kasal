@@ -411,3 +411,149 @@ Rules:
   `SUM(...) OVER (PARTITION BY keep_col1, keep_col2)` as an identity dimension, or
   flag UNSUPPORTED. Do NOT approximate with a single `range: all` window — it
   would collapse the wrong dimensions.
+
+---
+
+# Measure-shape recipes (daxpatterns.com)
+
+The sections above are the shapes seen most in the wild. The following are the
+standard analytical *patterns* from daxpatterns.com — each is a whole measure
+shape rather than a single function. Most reduce to a **source-view precompute**
+(a `GROUP BY` / `OVER (...)` in the `source:` SELECT, exposed as a dimension or a
+pre-aggregated column) that a plain measure then sums. That precompute is the
+`dax_class="architecture_change"` route: emittable, but it reshapes the source.
+For per-function mappings, see `FUNCTION_REFERENCE.md`.
+
+## 15. Static segmentation (fixed bands)
+
+Fixed price/age/size bands off a single row value → a `CASE` **dimension** (not a
+measure). The band is known without aggregating.
+
+```
+DAX:  Price Band := SWITCH(TRUE(), [Price]<10,"Low", [Price]<50,"Mid", "High")
+
+YAML: dimensions:
+        - name: price_band
+          expr: |
+            CASE WHEN source.price < 10 THEN 'Low'
+                 WHEN source.price < 50 THEN 'Mid'
+                 ELSE 'High' END
+```
+
+This is the ONE segmentation case that is a clean `translatable_direct` — it's a
+row-level bucket. Contrast with §16.
+
+## 16. Dynamic segmentation (band on an aggregated value)
+
+Count/measure entities whose **aggregated** value falls in a band (e.g. "customers
+whose total sales > 1000"). The band depends on an aggregate, so the row-level
+`CASE` of §15 is wrong — you must pre-aggregate to the entity grain first, then
+bucket. That is a source-view precompute.
+
+```
+DAX:  Big Customers :=
+        CALCULATE(DISTINCTCOUNT(Cust[Id]), FILTER(VALUES(Cust[Id]), [Sales] > 1000))
+
+YAML: version: '1.1'
+      source: |
+        SELECT cust_id, SUM(amount) AS cust_sales
+        FROM <catalog>.<schema>.sales
+        GROUP BY cust_id
+      dimensions:
+        - name: sales_band
+          expr: CASE WHEN source.cust_sales > 1000 THEN 'Big' ELSE 'Small' END
+      measures:
+        - name: customers
+          expr: COUNT(DISTINCT source.cust_id)          -- filter band at query time
+```
+
+Rule: the entity you count (`cust_id`) becomes the `GROUP BY` grain of the source
+precompute; the threshold measure (`[Sales]`) becomes the aggregate in that SELECT.
+Never approximate with a row-level `CASE` on the raw fact — it buckets rows, not
+entities.
+
+## 17. New & returning customers (first-purchase logic)
+
+"New in period" = entities whose FIRST-ever event falls in the period. `MIN() OVER`
+per entity in the source view exposes the first-event date; the measure then
+counts by comparing it to the row's period.
+
+```
+DAX:  New Customers :=
+        CALCULATE(DISTINCTCOUNT(Sales[Cust]),
+          FILTER(VALUES(Sales[Cust]), [First Order Date] IN <current period>))
+
+YAML: source: |
+        SELECT *, MIN(order_date) OVER (PARTITION BY cust_id) AS first_order_date
+        FROM <catalog>.<schema>.sales
+      measures:
+        - name: new_customers
+          expr: |
+            COUNT(DISTINCT source.cust_id)
+            FILTER (WHERE date_trunc('month', source.order_date)
+                      = date_trunc('month', source.first_order_date))
+        - name: returning_customers
+          expr: |
+            COUNT(DISTINCT source.cust_id)
+            FILTER (WHERE date_trunc('month', source.order_date)
+                      > date_trunc('month', source.first_order_date))
+```
+
+The `MIN(...) OVER (PARTITION BY entity)` first-event column is the reusable
+building block for new/returning/reactivated/churn variants.
+
+## 18. Events in progress (active-at-a-point-in-time)
+
+Count events open at each date: `start <= d AND (end >= d OR end IS NULL)`. This is
+a **range-join to a date spine**, not a fact aggregate — the fact has one row per
+event, but you count it once per active day. Requires a `dim_date` join.
+
+```
+DAX:  Open := CALCULATE(COUNTROWS(Ev),
+        FILTER(Ev, Ev[Start] <= MAX('Date'[Date]) && Ev[End] >= MIN('Date'[Date])))
+
+YAML: joins:
+        - name: cal
+          source: <catalog>.<schema>.dim_date
+          'on': source.start_date <= cal.d AND (source.end_date >= cal.d OR source.end_date IS NULL)
+      measures:
+        - name: events_in_progress
+          expr: COUNT(1)          # grouped by cal.d at query time
+```
+
+If the range-join is not acceptable (fan-out concerns), route to
+`architecture_change` and describe a source-view spine explode instead.
+
+## 19. Like-for-like / same-store
+
+Compare only entities present in **both** the current and prior period. The
+"present in both" set is an intersection — expressible as a `FILTER (WHERE …)` only
+if a "present-in-prior" flag is precomputed on the fact; otherwise it needs a
+source-view self-join.
+
+```
+DAX:  Same-Store Sales := CALCULATE([Sales],
+        FILTER(VALUES(Store[Id]), <store active in both periods>))
+
+YAML: source: |
+        SELECT s.*,
+          MAX(CASE WHEN period = :prev THEN 1 ELSE 0 END) OVER (PARTITION BY store_id) AS in_prev,
+          MAX(CASE WHEN period = :cur  THEN 1 ELSE 0 END) OVER (PARTITION BY store_id) AS in_cur
+        FROM <catalog>.<schema>.sales s
+      measures:
+        - name: like_for_like_sales
+          expr: SUM(source.amount) FILTER (WHERE source.in_prev = 1 AND source.in_cur = 1)
+```
+
+`dax_class="architecture_change"` — the `in_prev`/`in_cur` flags are the source
+reshape. Pair with the period-offset measure (§ time intelligence) for the
+comparison itself.
+
+## 20. Ranking / TOPN
+
+`RANKX` / `TOPN` rank-and-slice; metric views aggregate. See
+`FUNCTION_REFERENCE.md §2` (RANKX) and `UNSUPPORTED.md` (TOPN). Simple "rank by a
+measure" belongs in the **dashboard/visual** layer; a stored top-N needs a
+source-view `ROW_NUMBER() OVER (ORDER BY … DESC)` (or `QUALIFY`) exposed as a
+column. Do not emit a bare `MAX`/aggregate in place of a rank — it changes the
+semantics.

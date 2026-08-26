@@ -173,6 +173,31 @@ def _usage_suffix(referenced_by: int) -> str:
     return f' — referenced by {referenced_by} {noun}'
 
 
+_MAX_EXPLANATION = 140
+
+
+def _provenance_suffix(measure) -> str:
+    """Provenance annotation for an LLM-translated measure comment.
+
+    Makes best-effort output auditable: a reviewer sees the confidence, the
+    7-category dax_class, and the LLM's one-line justification for every measure
+    the LLM produced — so high-confidence ones can be trusted and lower-confidence
+    ones triaged. Empty for non-LLM (deterministic regex) measures, which are
+    exact by construction and need no justification.
+    """
+    if getattr(measure, 'category', None) != 'llm_translated':
+        return ''
+    conf = getattr(measure, 'confidence', '') or 'medium'
+    dax_class = getattr(measure, 'dax_class', '') or 'llm'
+    parts = f'LLM[{conf}/{dax_class}]'
+    explanation = (getattr(measure, 'explanation', '') or '').strip()
+    if explanation:
+        if len(explanation) > _MAX_EXPLANATION:
+            explanation = explanation[:_MAX_EXPLANATION - 1].rstrip() + '…'
+        parts += f': {explanation}'
+    return f' · {parts}'
+
+
 def _yaml_needs_quoting(val: str) -> bool:
     """Check if a YAML scalar value needs quoting."""
     if not val:
@@ -698,7 +723,10 @@ def emit_yaml(spec: MetricViewSpec,
             lines.append(f'    expr: {expr}')
             # Use per-table metadata override, fall back to generated
             m_override = _mm.get(m.measure_name, {})
-            comment = m_override.get('comment') or m.skip_reason or col_to_readable(m.measure_name)
+            if m_override.get('comment'):
+                comment = m_override['comment']          # human override wins verbatim
+            else:
+                comment = (m.skip_reason or col_to_readable(m.measure_name)) + _provenance_suffix(m)
             comment += _usage_suffix(m.referenced_by)
             lines.append(f'    comment: {_yaml_val(comment)}')
             m_meta = _meta_gen.get_measure_meta(m.measure_name, expr)
@@ -760,8 +788,10 @@ def emit_yaml(spec: MetricViewSpec,
             # Comment and metadata from per-table overrides or auto-generated
             m_override = _mm.get(m.measure_name, {})
             dax_comment = m_override.get('comment', '')
-            if not dax_comment and m.original_name != m.measure_name:
-                dax_comment = f'PBI: {m.original_name}'
+            if not dax_comment:
+                if m.original_name != m.measure_name:
+                    dax_comment = f'PBI: {m.original_name}'
+                dax_comment += _provenance_suffix(m)
             dax_comment += _usage_suffix(m.referenced_by)
             if dax_comment:
                 lines.append(f'    comment: {_yaml_val(dax_comment)}')

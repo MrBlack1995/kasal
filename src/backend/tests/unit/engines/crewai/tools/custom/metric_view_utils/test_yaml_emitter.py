@@ -773,3 +773,43 @@ class TestSourceSqlDangerousDrop:
         # inline SQL dropped → falls back to plain source_table, no DROP in output
         assert 'DROP TABLE' not in y
         assert 'source: cat.sch.tbl' in y or 'source: `cat`' in y or 'source:' in y
+
+
+class TestLLMProvenanceComments:
+    """LLM-translated (best-effort) measures carry a provenance comment;
+    deterministic regex measures do not (they are exact by construction)."""
+
+    def _llm(self, name, dax_class, confidence, explanation):
+        return TranslationResult(
+            measure_name=name, original_name='PBI ' + name,
+            sql_expr=f'SUM(source.{name})', is_translatable=True, skip_reason='',
+            dax_expression='', confidence=confidence, category='llm_translated',
+            dax_class=dax_class, explanation=explanation,
+        )
+
+    def _det(self, name):
+        return TranslationResult(
+            measure_name=name, original_name=name,
+            sql_expr=f'SUM(source.{name})', is_translatable=True, skip_reason='',
+            dax_expression='', confidence='high', category='single_table',
+        )
+
+    def _spec(self, measures):
+        return MetricViewSpec(
+            fact_table_key='fact', source_table='cat.sch.tbl', view_name='v',
+            comment='Test', joins=[], dimensions=[], measures=measures, untranslatable=[],
+        )
+
+    def test_llm_measure_gets_provenance(self):
+        y = emit_yaml(self._spec([self._llm('geo', 'translatable_direct', 'medium', 'geo mean via LN')]))
+        assert 'LLM[medium/translatable_direct]' in y
+        assert 'geo mean via LN' in y
+
+    def test_deterministic_measure_has_no_provenance(self):
+        y = emit_yaml(self._spec([self._det('total')]))
+        assert 'LLM[' not in y
+
+    def test_long_explanation_truncated(self):
+        y = emit_yaml(self._spec([self._llm('x', 'architecture_change', 'low', 'z' * 300)]))
+        assert '…' in y
+        assert 'z' * 300 not in y

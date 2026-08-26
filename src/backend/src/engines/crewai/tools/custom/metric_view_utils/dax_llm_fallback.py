@@ -15,6 +15,7 @@ from collections import OrderedDict
 from typing import Any
 
 from .data_classes import TranslationResult
+from .function_ref_retriever import render_function_refs
 from .utils import to_snake_case
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ _RUN_CACHE_MAX = 128
 _SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 _SKILL_FILES = (
     ("dax", "SKILL.md"), ("dax", "PATTERNS.md"),
+    ("dax", "FUNCTION_REFERENCE.md"),
     ("dax", "UNSUPPORTED.md"), ("dax", "EDGE_CASES.md"),
     ("uc-metric-views", "SYNTAX.md"), ("uc-metric-views", "WINDOW.md"),
     ("uc-metric-views", "LOD.md"), ("uc-metric-views", "JOINS.md"),
@@ -268,11 +270,15 @@ def _build_batch_user_prompt(
     for i, m in enumerate(measures, start=1):
         lines.append(f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}")
     measures_block = "\n".join(lines)
+    # Retrieval: inject deep UCMV-legal references for the long-tail DAX functions
+    # this batch uses (skips functions already taught deeply in the cached prefix).
+    # Goes in the VARIABLE user message so the corpus prefix stays cacheable.
+    func_refs = render_function_refs(m.dax_expression for m in measures)
     return f"""Translate the following {len(measures)} DAX measures to Spark SQL for a UC Metric View, using the shared fact-table context below.
 {ctx_block}
 ## Available MEASURE() references (already translated)
 {available_measures}
-
+{func_refs}
 ## Measures to translate
 {measures_block}
 
@@ -340,6 +346,7 @@ def _apply_parsed(measure: TranslationResult, parsed: dict, usage: dict | None =
         measure.category = 'llm_translated'
         # dax_class = translation provenance/quality (7-cat); NOT emission routing.
         measure.dax_class = parsed.get('dax_class')
+        measure.explanation = parsed.get('explanation')
         measure.skip_reason = ''
         usage = usage or {}
         tokens = usage.get('total_tokens', 0)
@@ -352,6 +359,7 @@ def _apply_parsed(measure: TranslationResult, parsed: dict, usage: dict | None =
     else:
         # Even on non-success, record the classification for reporting/telemetry.
         measure.dax_class = parsed.get('dax_class') or measure.dax_class
+        measure.explanation = parsed.get('explanation') or measure.explanation
         reason = parsed.get('error', parsed.get('explanation', 'LLM could not translate'))
         measure.skip_reason = _llm_declined_reason(measure.dax_class, reason)
         logger.info(f"[DAX_LLM] Could not translate {measure.original_name} (dax_class={measure.dax_class}): {reason}")
