@@ -28,7 +28,7 @@ from .relationships_loader import RelationshipsLoader
 from .utils import to_snake_case, col_to_readable
 from .yaml_emitter import emit_yaml
 from .sql_emitter import emit_deploy_sql
-from .report_emitter import emit_migration_report
+from .report_emitter import build_proposal, emit_migration_report
 from .table_processor import (
     process_table,
     expand_calculation_groups,
@@ -794,6 +794,12 @@ class MetricViewPipeline:
                         'dax_expression': m.dax_expression,
                         'dax_class': m.dax_class,
                         'referenced_by': getattr(m, 'referenced_by', 0),
+                        # The LLM's concrete recipe (when it gave one) and a single
+                        # actionable next-step so the "Not transpiled" panel proposes
+                        # HOW to handle each measure, not just why it was skipped.
+                        'explanation': getattr(m, 'explanation', None),
+                        'proposal': build_proposal(
+                            m.dax_class, getattr(m, 'explanation', None), m.skip_reason),
                     }
                     for m in spec.untranslatable
                 ],

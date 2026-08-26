@@ -665,6 +665,10 @@ class UCMetricViewGeneratorTool(BaseTool):
                     'category': m.get('category', ''),
                     'dax_class': m.get('dax_class'),
                     'referenced_by': m.get('referenced_by', 0),
+                    # Actionable next-step for the reviewer (HOW to handle it),
+                    # sourced from the LLM's recipe or a class-based default.
+                    'proposal': m.get('proposal', ''),
+                    'explanation': m.get('explanation'),
                 })
         # High-impact gaps first (most-depended-on measures at the top).
         items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)

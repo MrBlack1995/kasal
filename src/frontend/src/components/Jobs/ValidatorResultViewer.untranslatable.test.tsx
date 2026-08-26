@@ -20,6 +20,7 @@ const ITEMS: ValidatorUntranslatableItem[] = [
     skip_reason: 'period-shift not expressible in a static UC metric view',
     category: 'prior-year time-intelligence',
     referenced_by: 4,
+    proposal: 'Add a calendar date_py join or a window offset to express prior-year.',
   },
   {
     table_key: 'fact_sales',
@@ -57,6 +58,12 @@ describe('ValidatorResultViewer — Not transpiled section', () => {
     expect(screen.getByText(/period-shift not expressible/)).toBeInTheDocument();
     // Original DAX visible for investigation
     expect(screen.getByText(/SAMEPERIODLASTYEAR/)).toBeInTheDocument();
+  });
+
+  it('renders the Proposed approach column with the proposal text', () => {
+    render(<ValidatorResultViewer result={makeResult()} />);
+    expect(screen.getByText('Proposed approach')).toBeInTheDocument();
+    expect(screen.getByText(/Add a calendar date_py join or a window offset/)).toBeInTheDocument();
   });
 
   it('orders items by impact (referenced_by) descending', () => {

@@ -120,6 +120,11 @@ export interface UntranslatableItem {
   category: string;
   dax_class?: string | null;
   referenced_by: number;
+  /** Actionable next-step for handling this measure (HOW), from the LLM's own
+   *  recipe or a class-based default. Emitted by the generator alongside the
+   *  terse skip_reason (WHY). */
+  proposal?: string;
+  explanation?: string | null;
 }
 
 /** Triage status a reviewer can assign to a non-transpiled item. */
@@ -336,12 +341,13 @@ const NonTranspiledPanel: React.FC<{
       <Table size="small" sx={{ tableLayout: 'fixed' }}>
         <TableHead>
           <TableRow>
-            <TableCell sx={{ fontWeight: 600, width: '18%' }}>Measure</TableCell>
-            <TableCell sx={{ fontWeight: 600, width: '30%' }}>DAX</TableCell>
-            <TableCell sx={{ fontWeight: 600, width: '18%' }}>Reason</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '15%' }}>Measure</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '24%' }}>DAX</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '14%' }}>Reason</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '16%' }} title="Suggested next step for handling this measure">Proposed approach</TableCell>
             <TableCell sx={{ fontWeight: 600, width: '6%' }} align="right" title="How many other measures reference this one">Used by</TableCell>
             <TableCell sx={{ fontWeight: 600, width: '13%' }}>Status</TableCell>
-            <TableCell sx={{ fontWeight: 600, width: '15%' }}>Note</TableCell>
+            <TableCell sx={{ fontWeight: 600, width: '12%' }}>Note</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
@@ -363,6 +369,13 @@ const NonTranspiledPanel: React.FC<{
                       {item.skip_reason}
                     </Typography>
                   )}
+                </TableCell>
+                <TableCell sx={{ fontSize: '0.75rem', wordBreak: 'break-word' }}>
+                  {item.proposal ? (
+                    <Typography variant="caption" display="block" color="text.secondary">
+                      {item.proposal}
+                    </Typography>
+                  ) : '—'}
                 </TableCell>
                 <TableCell sx={{ fontSize: '0.8rem' }} align="right">
                   {item.referenced_by > 0 ? item.referenced_by : '—'}

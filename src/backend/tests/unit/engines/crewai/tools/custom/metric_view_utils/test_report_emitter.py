@@ -230,3 +230,22 @@ class TestTablesNotEmitted:
         stats = {'Weird': self._skip('some_new_cat', 'let x = 1 in x')}
         report = emit_migration_report({}, stats)
         assert '**Weird**' in report
+
+
+from src.engines.crewai.tools.custom.metric_view_utils.report_emitter import build_proposal
+
+
+class TestBuildProposal:
+    """Every not-emitted measure gets an actionable proposal, not just a reason."""
+
+    def test_llm_explanation_used_verbatim(self):
+        p = build_proposal('architecture_change', 'Precompute the scorecard KPI as a column.', 'reason')
+        assert p == 'Precompute the scorecard KPI as a column.'
+
+    def test_class_default_when_no_explanation(self):
+        assert 'dashboard' in build_proposal('display_layer', None, 'slicer dispatch').lower()
+        assert 'base measure' in build_proposal('composed', '', 'dep').lower()
+        assert 'source-view' in build_proposal('architecture_change', None, 'x').lower()
+
+    def test_unknown_class_falls_back(self):
+        assert 'manual translation' in build_proposal(None, None, None).lower()

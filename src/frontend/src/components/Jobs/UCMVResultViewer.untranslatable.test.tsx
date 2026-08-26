@@ -23,6 +23,7 @@ const ITEMS: UntranslatableItem[] = [
     category: 'prior-year time-intelligence',
     dax_class: 'unsupported',
     referenced_by: 3,
+    proposal: 'Add a calendar date_py join or a window offset to express prior-year.',
   },
   {
     table_key: 'mv_fact_sales',
@@ -54,6 +55,12 @@ describe('UCMVResultViewer — Not transpiled panel', () => {
     expect(screen.getByText('YoY Growth')).toBeInTheDocument();
     expect(screen.getByText('Sales Color')).toBeInTheDocument();
     expect(screen.getByText(/SAMEPERIODLASTYEAR/)).toBeInTheDocument();
+  });
+
+  it('renders the Proposed approach column with the proposal text', () => {
+    render(<UCMVResultViewer result={makeResult()} />);
+    expect(screen.getByText('Proposed approach')).toBeInTheDocument();
+    expect(screen.getByText(/Add a calendar date_py join or a window offset/)).toBeInTheDocument();
   });
 
   it('sorts items by impact (referenced_by) descending', () => {

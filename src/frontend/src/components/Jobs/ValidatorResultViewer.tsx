@@ -128,6 +128,9 @@ export interface ValidatorUntranslatableItem {
   category?: string;
   dax_class?: string | null;
   referenced_by?: number;
+  /** Actionable next-step (HOW to handle it), from the generator's build_proposal. */
+  proposal?: string;
+  explanation?: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -550,10 +553,11 @@ const ValidatorResultViewer: React.FC<{ result: ValidatorResult }> = ({ result }
               <Table size="small" sx={{ tableLayout: 'fixed' }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ fontWeight: 600, width: '18%' }}>Measure</TableCell>
-                    <TableCell sx={{ fontWeight: 600, width: '16%' }}>Table</TableCell>
-                    <TableCell sx={{ fontWeight: 600, width: '22%' }}>Reason</TableCell>
-                    <TableCell sx={{ fontWeight: 600, width: '36%' }}>DAX</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '15%' }}>Measure</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '13%' }}>Table</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '18%' }}>Reason</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '18%' }} title="Suggested next step for handling this measure">Proposed approach</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: '28%' }}>DAX</TableCell>
                     <TableCell sx={{ fontWeight: 600, width: '8%' }} align="right" title="How many other measures reference this one">Used by</TableCell>
                   </TableRow>
                 </TableHead>
@@ -575,6 +579,13 @@ const ValidatorResultViewer: React.FC<{ result: ValidatorResult }> = ({ result }
                             {item.skip_reason}
                           </Typography>
                         )}
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.7rem', wordBreak: 'break-word' }}>
+                        {item.proposal ? (
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            {item.proposal}
+                          </Typography>
+                        ) : '—'}
                       </TableCell>
                       <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
                         {item.dax_expression || '—'}
