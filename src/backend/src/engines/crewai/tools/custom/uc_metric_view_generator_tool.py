@@ -367,15 +367,31 @@ class UCMetricViewGeneratorTool(BaseTool):
             except Exception as e:
                 logger.warning(f"Failed to parse relationships: {e}")
 
-        # Parse scan data
+        # Parse scan data. scan_data carries the raw Power Query M per table, which
+        # drives physical-name resolution (Gaps 1-2) and generated-view SQL (Gap 3).
+        # It comes from the Power BI Admin Scanner (config-gen API 3), which REJECTS
+        # service-principal / service-account tokens (401/403) and then degrades to
+        # an empty payload — so a missing/blank scan is a *credentials* signal, not a
+        # code error. Log it clearly and actionably rather than as a scary parse fail.
         scan_data = {}
         scan_parser = ScanDataParser()
-        if scan_raw:
+        _scan_raw = (scan_raw or "").strip()
+        if _scan_raw and _scan_raw not in ("{}", "[]", "null"):
             try:
-                scan_obj = json.loads(scan_raw) if isinstance(scan_raw, str) else scan_raw
+                scan_obj = json.loads(_scan_raw) if isinstance(_scan_raw, str) else scan_raw
                 scan_data = scan_parser.parse(scan_obj)
             except Exception as e:
-                logger.warning(f"Failed to parse scan data: {e}")
+                logger.warning(
+                    "[UCMV] scan_data_json present but unparseable (%s) — physical-name "
+                    "resolution and generated-view SQL will be SKIPPED for this run.", e)
+        if not scan_data:
+            logger.warning(
+                "[UCMV] No usable scan_data (the Power BI Admin Scanner likely rejected the "
+                "token or returned empty). The raw Power Query M lives only in the scan, so "
+                "physical-name resolution (Gaps 1-2) and generated-view SQL (Gap 3) are SKIPPED "
+                "— tables/columns will use model (display) names. Provide admin credentials the "
+                "Admin Scanner accepts (admin_username/password or an admin SP with the tenant's "
+                "read-only-admin-API setting enabled) to enable them.")
 
         # Run pipeline
         pipeline = MetricViewPipeline(

@@ -369,6 +369,21 @@ class MetricViewPipeline:
                 self.all_specs, self.mquery_tables, self._mquery_expressions)
             if _res.get('generated_tables'):
                 self._limitations['generated_tables'] = _res['generated_tables']
+                # Gap 3 materialization: emit CREATE VIEW SQL for generated calendars
+                # (List.Dates etc.) so the reviewer can create the missing source.
+                from .generated_table_emitter import emit_view_sql
+                _gen_sql = {}
+                for _t in _res['generated_tables']:
+                    _sql = emit_view_sql(
+                        self._mquery_expressions.get(_t, ''),
+                        f"{{catalog}}.{{schema}}.{to_snake_case(_t)}")
+                    if _sql:
+                        _gen_sql[_t] = _sql
+                if _gen_sql:
+                    self._limitations['generated_view_sql'] = _gen_sql
+                    logger.info(
+                        "[MetricViewPipeline] emitted CREATE VIEW SQL for %d generated "
+                        "table(s): %s", len(_gen_sql), ', '.join(sorted(_gen_sql)))
 
         # Phase 2c: Rebuild YAML comment blocks to reflect updated skip_reasons
         for spec in self.all_specs.values():
