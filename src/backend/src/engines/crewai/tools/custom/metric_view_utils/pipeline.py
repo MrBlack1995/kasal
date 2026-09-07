@@ -75,12 +75,22 @@ class MetricViewPipeline:
         refresh_policy_tables: list[dict] | None = None,
         no_summarize_columns: list[dict] | None = None,
         rls_tables: set[str] | None = None,
+        mquery_expressions: dict | None = None,
     ):
         self.mapping = mapping
         self.mquery_tables = mquery_tables
         self.config = config or {}
         self.inner_dim_joins = inner_dim_joins
         self.scan_data = scan_data or {}
+        # Raw Power Query M per table, for physical-name resolution (Gaps 1–3).
+        # Prefer the explicit map; otherwise recover it from scan_data if present.
+        self._mquery_expressions: dict[str, str] = dict(mquery_expressions or {})
+        if not self._mquery_expressions and self.scan_data:
+            for _k, _si in self.scan_data.items():
+                _m = (_si.get('raw_m_expression') or _si.get('m_expression')
+                      if isinstance(_si, dict) else getattr(_si, 'raw_m_expression', None))
+                if _m:
+                    self._mquery_expressions[_k] = _m
         self.unflatten_tables = unflatten_tables
         self.llm_config = llm_config or {}
         self._inactive_rels: list[dict] = inactive_relationships or []
@@ -350,6 +360,15 @@ class MetricViewPipeline:
                 if primary_table and primary_table != spec.fact_table_key:
                     if m.original_name in global_covered or to_snake_case(m.original_name) in global_covered:
                         m.skip_reason = 'Covered on primary table (secondary allocation)'
+
+        # Phase 2b-fix: resolve physical table/column names from the Power Query M
+        # (KASAL_FIXES Gaps 1–3). Fail-open — unresolved identifiers are left as-is.
+        if self._mquery_expressions:
+            from .physical_name_resolver import resolve_physical_names
+            _res = resolve_physical_names(
+                self.all_specs, self.mquery_tables, self._mquery_expressions)
+            if _res.get('generated_tables'):
+                self._limitations['generated_tables'] = _res['generated_tables']
 
         # Phase 2c: Rebuild YAML comment blocks to reflect updated skip_reasons
         for spec in self.all_specs.values():
@@ -750,6 +769,15 @@ class MetricViewPipeline:
 
     def get_results(self) -> dict:
         """Return pipeline results as a serializable dict."""
+        from .recovery_recommender import recommend as _recovery_recipe
+        # Tables reachable only via a skipped many:many/bidirectional relationship
+        # — used to recommend an EXISTS-precompute recovery (Gap 4) instead of a
+        # generic decline.
+        _m2n_tables: set[str] = set()
+        for _r in self._limitations.get('m2n_relationships', []) or []:
+            _m2n_tables.add(_r.get('from_table', ''))
+            _m2n_tables.add(_r.get('to_table', ''))
+        _m2n_tables.discard('')
         results = {
             'specs': {},
             'stats': self.stats,
@@ -798,8 +826,16 @@ class MetricViewPipeline:
                         # actionable next-step so the "Not transpiled" panel proposes
                         # HOW to handle each measure, not just why it was skipped.
                         'explanation': getattr(m, 'explanation', None),
+                        # Prefer the LLM's own recipe; else a concrete Gap 4/5 recovery
+                        # recipe (EXISTS precompute / separate-grain view) when the DAX
+                        # shape matches; else the class-based default.
                         'proposal': build_proposal(
-                            m.dax_class, getattr(m, 'explanation', None), m.skip_reason),
+                            m.dax_class,
+                            getattr(m, 'explanation', None) or _recovery_recipe(
+                                m.dax_expression, fact_table=spec.fact_table_key,
+                                m2n_tables=_m2n_tables,
+                                join_tables={j.get('name') for j in (spec.joins or [])}),
+                            m.skip_reason),
                     }
                     for m in spec.untranslatable
                 ],

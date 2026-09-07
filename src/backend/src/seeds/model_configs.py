@@ -308,13 +308,6 @@ DEFAULT_MODELS = {
         "context_window": 200000,
         "max_output_tokens": 64000
     },
-    "databricks-gemini-2-5-flash": {
-        "name": "databricks-gemini-2-5-flash",
-        "temperature": 0.7,
-        "provider": "databricks",
-        "context_window": 1048576,
-        "max_output_tokens": 65536
-    },
     "databricks-gemini-3-1-flash-lite": {
         "name": "databricks-gemini-3-1-flash-lite",
         "temperature": 0.7,
@@ -475,6 +468,11 @@ REMOVED_MODEL_KEYS = [
     "databricks-gpt-5-5-pro",                    # Responses-API-only (unsupported via chat completions)
     "databricks-gpt-5-5",                        # function tools unsupported via chat completions (Responses API only) — breaks tool crews
     "databricks-gemini-2-5-pro",                 # removed per request (superseded by gemini-3-5-flash / gemini-3-1-flash-lite)
+    # Databricks deprecated this endpoint (returns BAD_REQUEST "This endpoint
+    # databricks-gemini-2-5-flash is deprecated"). It was still a high-context
+    # (1M) fallback candidate, so DatabricksRetryLLM fell back to it and crashed a
+    # UCMV flow with a non-retryable BadRequestError. Pruned 2026-09-07.
+    "databricks-gemini-2-5-flash",
     "databricks-meta-llama-3-1-405b-instruct",   # NOT_FOUND (pay-per-token disabled)
     # Reasoning model: answers the JSON-only planning prompt with a "thinking"
     # preamble ("1. Analyze the Request: ..."), so crew planning fails with
