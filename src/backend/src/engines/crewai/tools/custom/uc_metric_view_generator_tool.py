@@ -361,6 +361,26 @@ class UCMetricViewGeneratorTool(BaseTool):
                 rel_data = json.loads(relationships_raw) if isinstance(relationships_raw, str) else relationships_raw
                 loader = RelationshipsLoader()
                 fact_keys = {k for k, v in mquery_tables.items() if v.is_fact}
+                # Also enrich tables that have DAX measures allocated to them but are
+                # NOT aggregate-SQL facts (raw-grain / data-vault sources like fact_pe005,
+                # whose M is a plain SELECT). Phase 1b promotes these to facts *during*
+                # the run — but RelationshipsLoader only builds joins for tables in
+                # fact_keys, so without adding them here they get ZERO joins and their
+                # join-dependent measures (e.g. the *_Yeild_Actual ratios filtering on
+                # Dim_wkctr/Dim_Plant) decline. Gate on a real source_table (matches
+                # Phase 1b) so UI/selection/measure-holder tables aren't pulled in.
+                try:
+                    _measures = (json.loads(measures_raw)
+                                 if isinstance(measures_raw, str) else (measures_raw or []))
+                except Exception:
+                    _measures = []
+                for _m in (_measures or []):
+                    _allocs = [a.get('table') for a in (_m.get('all_allocations') or [])] \
+                        or [_m.get('proposed_allocation')]
+                    for _t in _allocs:
+                        _ti = mquery_tables.get(_t)
+                        if _t and _ti is not None and getattr(_ti, 'source_table', None):
+                            fact_keys.add(_t)
                 relationships_enrichment = loader.load(rel_data, mquery_tables, fact_keys)
                 m2n_relationships = loader.get_skipped_m2n()
                 inactive_relationships = loader.get_inactive_relationships()
