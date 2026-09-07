@@ -1,8 +1,34 @@
 """Tests for recovery_recommender (KASAL_FIXES Gaps 4 & 5)."""
 
 from src.engines.crewai.tools.custom.metric_view_utils.recovery_recommender import (
+    draft_source_view,
     recommend,
 )
+
+
+def test_draft_crossfact_unions_the_facts():
+    dax = (
+        "var a = SUMX(fact_pe005, fact_pe005[val]) "
+        "var b = SUMX(fact_scorecard_Actuals_wc, fact_scorecard_Actuals_wc[val]) RETURN a+b"
+    )
+    d = draft_source_view(dax, fact_table="fact_pe005")
+    assert d and "DRAFT · UNVERIFIED" in d
+    assert "UNION ALL" in d and "fact_pe005" in d and "fact_scorecard_Actuals_wc" in d
+    assert "CREATE OR REPLACE VIEW" in d
+
+
+def test_draft_multistage_precompute_view():
+    dax = (
+        "VAR t = SUMMARIZE(FILTER('F', TRUE()), 'F'[k], \"x\", 1) "
+        "RETURN AVERAGEX(t, [x])"
+    )
+    d = draft_source_view(dax, fact_table="survey_responses", measure_name="adc")
+    assert d and "DRAFT · UNVERIFIED" in d
+    assert "GROUP BY <grain_cols>" in d and "SEPARATE UCMV" in d
+
+
+def test_draft_none_for_simple_measure():
+    assert draft_source_view("SUM('Fact'[amount])", fact_table="Fact") is None
 
 
 def test_gap5_multistage_aggregation():

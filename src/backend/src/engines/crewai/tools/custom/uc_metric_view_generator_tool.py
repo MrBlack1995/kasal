@@ -705,6 +705,9 @@ class UCMetricViewGeneratorTool(BaseTool):
                     # sourced from the LLM's recipe or a class-based default.
                     'proposal': m.get('proposal', ''),
                     'explanation': m.get('explanation'),
+                    # Labeled DRAFT CREATE VIEW scaffold for cross-fact / multi-stage
+                    # (proposal artifact, never an emitted measure).
+                    'source_view_sql_draft': m.get('source_view_sql_draft'),
                 })
         # High-impact gaps first (most-depended-on measures at the top).
         items.sort(key=lambda x: x.get('referenced_by', 0), reverse=True)

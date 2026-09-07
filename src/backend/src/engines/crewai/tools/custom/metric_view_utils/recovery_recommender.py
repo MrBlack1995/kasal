@@ -102,3 +102,68 @@ def recommend(
         )
 
     return None
+
+
+_FACT_REF = re.compile(r"'([^']*[Ff]act[^']*)'\s*\[|\b(\w*[Ff]act\w*)\b\s*\[")
+
+
+def _facts_in(dax: str) -> set[str]:
+    out = set()
+    for a, b in _FACT_REF.findall(dax or ""):
+        t = (a or b).strip()
+        if t:
+            out.add(t)
+    return out
+
+
+def draft_source_view(
+    dax: str, *, measure_name: str = "measure", fact_table: str | None = None
+) -> str | None:
+    """Best-effort, UNVERIFIED `CREATE VIEW` scaffold for the cases that need a
+    source-view reshape (cross-fact UNION, multi-stage precompute), or None.
+
+    This is a *proposal artifact* — a labeled starting point a human completes and
+    verifies against PBI. It is NEVER an emitted/active measure, so a wrong draft
+    can't ship bad data; worst case the draft needs editing. Deterministic (no LLM):
+    it scaffolds the structure + embeds the original DAX to translate by hand.
+    """
+    dax = dax or ""
+    label = (
+        "-- DRAFT · UNVERIFIED · verify against PBI before use\n"
+        "-- Auto-scaffolded from the declined DAX — complete the <…> parts, then\n"
+        "-- point a UC metric view's `source:` at this view.\n"
+    )
+    dax_c = "\n".join("--   " + ln for ln in dax.strip().splitlines()[:40])
+    base = fact_table or "fact"
+
+    facts = _facts_in(dax)
+    if len(facts) > 1:  # cross-fact → UNION source view
+        arms = "\n  UNION ALL\n".join(
+            f"  SELECT /* aligned shared keys */ *, '{f}' AS _src FROM {f}"
+            for f in sorted(facts)
+        )
+        return (
+            f"{label}-- Cross-fact: spans {', '.join(sorted(facts))}. UC metric views are single-source,\n"
+            f"-- so UNION the facts here (align columns, tag _src), then express the measure as\n"
+            f"-- filtered SUMs over the tagged rows in a UCMV on this view.\n"
+            f"-- Original DAX:\n{dax_c}\n"
+            f"CREATE OR REPLACE VIEW <catalog>.<schema>.{base}__unioned AS\n{arms}\n;"
+        )
+
+    if _GROUPERS.search(dax) and _ITERATORS.search(
+        dax
+    ):  # multi-stage → precompute view
+        return (
+            f"{label}-- Multi-stage: precompute the inner GROUP BY at its grain here, then build a\n"
+            f"-- SEPARATE UCMV on this view that AVG/SUMs across the outer level\n"
+            f"-- (co-locating on the fact grain gives a row-weighted-average bug).\n"
+            f"-- Original DAX:\n{dax_c}\n"
+            f"CREATE OR REPLACE VIEW <catalog>.<schema>.{base}__by_<grain> AS\n"
+            f"  SELECT <grain_cols>,\n"
+            f"         /* inner aggregate per <grain>, e.g. */ SUM(<value>) AS {measure_name}_inner\n"
+            f"  FROM {base}\n"
+            f"  /* JOIN <dims> …  WHERE <filters> */\n"
+            f"  GROUP BY <grain_cols>\n;"
+        )
+
+    return None

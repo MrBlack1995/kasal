@@ -635,6 +635,17 @@ class PipelineConfigGeneratorTool(BaseTool):
                 _um["referenced_by"] = _usage.get(
                     _um.get("original_name") or _um.get("measure_name"), 0)
 
+            # Ship the raw Power Query M per table so the UCMV pipeline can resolve
+            # physical table/column names and materialize generated (List.Dates)
+            # tables — KASAL_FIXES Gaps 1-3 — without a separate scan_data handoff.
+            # Rides inside proposed_config (already injected into the generator's
+            # config_json), so no new flow field/wiring is needed. Keyed table→raw M.
+            config["table_mquery_expressions"] = {
+                _n: (_t.get("mquery_expression") or _t.get("mquery") or "")
+                for _n, _t in (admin_tables or {}).items()
+                if isinstance(_t, dict) and (_t.get("mquery_expression") or _t.get("mquery"))
+            }
+
             output = {
                 "proposed_config": config,
                 # Consumed by the flow handoff → UCMV JSON mode.

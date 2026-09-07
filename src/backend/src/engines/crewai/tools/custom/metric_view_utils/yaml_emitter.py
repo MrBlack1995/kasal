@@ -893,6 +893,19 @@ def emit_yaml(spec: MetricViewSpec,
                     lines.append(f'  #       DAX:')
                     for dax_line in dax.split('\n'):
                         lines.append(f'  #         {dax_line}')
+                # Best-effort, UNVERIFIED source-view SQL scaffold for the cross-fact /
+                # multi-stage cases — a starting point to build a new view + UCMV on it.
+                # Never an emitted measure; the reviewer completes + verifies it.
+                try:
+                    from .recovery_recommender import draft_source_view
+                    _draft = draft_source_view(
+                        dax, measure_name=m.measure_name, fact_table=spec.fact_table_key)
+                except Exception:
+                    _draft = None
+                if _draft:
+                    lines.append(f'  #       SOURCE-VIEW DRAFT (build this, then a UCMV on it):')
+                    for _dl in _draft.split('\n'):
+                        lines.append(f'  #         {_dl}')
 
     lines.append('')
     return '\n'.join(lines)

@@ -91,6 +91,12 @@ class MetricViewPipeline:
                       if isinstance(_si, dict) else getattr(_si, 'raw_m_expression', None))
                 if _m:
                     self._mquery_expressions[_k] = _m
+        # Fallback: config-gen ships the raw M per table in the config (no scan_data
+        # needed). Enables physical-name resolution + generated-view SQL in the flow.
+        if not self._mquery_expressions:
+            _cfg_m = self.config.get('table_mquery_expressions')
+            if isinstance(_cfg_m, dict):
+                self._mquery_expressions = {k: v for k, v in _cfg_m.items() if v}
         self.unflatten_tables = unflatten_tables
         self.llm_config = llm_config or {}
         self._inactive_rels: list[dict] = inactive_relationships or []
@@ -785,6 +791,7 @@ class MetricViewPipeline:
     def get_results(self) -> dict:
         """Return pipeline results as a serializable dict."""
         from .recovery_recommender import recommend as _recovery_recipe
+        from .recovery_recommender import draft_source_view as _draft_source_view
         # Tables reachable only via a skipped many:many/bidirectional relationship
         # — used to recommend an EXISTS-precompute recovery (Gap 4) instead of a
         # generic decline.
@@ -851,6 +858,12 @@ class MetricViewPipeline:
                                 m2n_tables=_m2n_tables,
                                 join_tables={j.get('name') for j in (spec.joins or [])}),
                             m.skip_reason),
+                        # Best-effort, UNVERIFIED source-view SQL scaffold for cross-fact /
+                        # multi-stage measures — a proposal starting point, never an emitted
+                        # measure. Clearly labeled DRAFT; complete + verify against PBI.
+                        'source_view_sql_draft': _draft_source_view(
+                            m.dax_expression, measure_name=m.measure_name,
+                            fact_table=spec.fact_table_key),
                     }
                     for m in spec.untranslatable
                 ],
