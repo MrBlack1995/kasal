@@ -837,14 +837,24 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
               disabled={disabled}
               fullWidth
               multiline
-              rows={4}
+              rows={9}
               size="small"
               error={!!namingConfigError}
+              placeholder={`{
+  "lint": {
+    "scenario_suffixes": ["actual", "budget", "forecast", "py"],
+    "unit_suffixes": ["hours", "cases", "hl"],
+    "dimension_alias_groups": [["comp_code", "company_code"]]
+  },
+  "period": {
+    "column_overrides": { "latest_month_label": "IsCurrentMonth" }
+  }
+}`}
               helperText={
                 namingConfigError ||
-                'Per-model vocabulary for the metadata lint and calendar period-folding — leave blank to use the built-in defaults. ' +
-                'Shape: {"lint": {"scenario_suffixes": [...], "unit_suffixes": [...], "dimension_alias_groups": [[...]]}, ' +
-                '"period": {"column_overrides": {"latest_month_label": "IsCurrentMonth"}}}'
+                'Optional — leave blank to use the built-in defaults. Per-model vocabulary for ' +
+                'the metadata lint (scenario/unit suffixes, dimension alias groups) and the calendar ' +
+                'period-folding (column_overrides). The greyed example shows the exact shape; type over it.'
               }
               InputProps={{
                 sx: { fontFamily: 'monospace', fontSize: '0.75rem' }
