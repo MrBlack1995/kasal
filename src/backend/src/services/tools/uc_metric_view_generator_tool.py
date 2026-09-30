@@ -48,6 +48,28 @@ class UCMetricViewGeneratorSchema(BaseModel):
         None,
         description="JSON pipeline config overrides (join_key_map, fact_join_map, etc.)",
     )
+    refinement_feedback: Optional[str] = Field(
+        None,
+        description=(
+            "Iterative-reconciliation feedback from a prior cycle (JSON): the "
+            "build_refinement_feedback list [{measure, pct_aligned, "
+            "sample_mismatches}] or a {measure: hint} dict. When present with LLM "
+            "fallback on, the DAX translator is told which measures mismatched "
+            "Power BI last cycle so it fixes them. Set by the reconciliation loop; "
+            "not usually supplied by hand."
+        ),
+    )
+    naming_config: Optional[str] = Field(
+        None,
+        description=(
+            "JSON of per-model naming/period vocabulary for the metadata lint and "
+            "calendar period-folding — CCH/Total-SC values are the defaults, so this "
+            'is only needed for other models. Shape: {"lint": {"scenario_suffixes": '
+            '[...], "unit_suffixes": [...], "dimension_alias_groups": [[...]], '
+            '"min_description_len": int}, "period": {"column_overrides": '
+            '{"latest_month_label": "IsCurrentMonth", ...}}}.'
+        ),
+    )
     implicit_column_measures: Optional[str] = Field(
         None,
         description=(
@@ -56,6 +78,34 @@ class UCMetricViewGeneratorSchema(BaseModel):
             "columns with PBI's own implicit aggregation that are drawn/filtered "
             "directly in a report visual with no named DAX measure behind them."
         ),
+    )
+    enable_reconciliation: Optional[bool] = Field(
+        False,
+        description=(
+            "When true (and warehouse_id + reference_years + Power BI credentials "
+            "are provided), run the iterative loop: after each generation cycle, "
+            "deploy the metric view and reconcile it cell-by-cell against the live "
+            "Power BI model, feeding mismatches back to refine failing measures. "
+            "Deploys once per cycle. Without the prerequisites, generation is "
+            "single-pass as usual."
+        ),
+    )
+    max_reconciliation_cycles: Optional[int] = Field(
+        5, description="Max iterative reconciliation cycles (when enabled)."
+    )
+    reconciliation_target_pct: Optional[float] = Field(
+        100.0,
+        description="Stop early once overall cell alignment reaches this percentage.",
+    )
+    reference_years: Optional[str] = Field(
+        None,
+        description="Fiscal years to reconcile, as a JSON array or comma list "
+        '(e.g. "[2025, 2026]" or "2025,2026"). Required for reconciliation.',
+    )
+    warehouse_id: Optional[str] = Field(
+        None,
+        description="Databricks SQL warehouse ID — required for reconciliation "
+        "(deploys + queries the metric view).",
     )
     catalog: Optional[str] = Field(None, description="Target UC catalog name")
     schema_name: Optional[str] = Field(None, description="Target UC schema name")
@@ -170,6 +220,13 @@ class UCMetricViewGeneratorTool(BaseTool):
             "visual_usage_index",
             "implicit_column_measures",
             "config_json",
+            "naming_config",
+            "refinement_feedback",
+            "enable_reconciliation",
+            "max_reconciliation_cycles",
+            "reconciliation_target_pct",
+            "reference_years",
+            "warehouse_id",
             "catalog",
             "schema_name",
             "inner_dim_joins",
@@ -214,6 +271,24 @@ class UCMetricViewGeneratorTool(BaseTool):
         def _get(key):
             return kwargs.get(key) or self._default_config.get(key)
 
+        # Iterative reconciliation: when enabled (and not already inside the loop),
+        # delegate to the generate→deploy→reconcile→refine orchestrator. It calls
+        # this same tool with reconciliation off (guarded by _in_recon_loop), so
+        # there is no recursion. Falls through to single-pass if prerequisites
+        # (warehouse_id / reference_years / creds) are missing.
+        if _get("enable_reconciliation") and not kwargs.get("_in_recon_loop"):
+            try:
+                from src.services.tools.ucmv_iterative_recon import run_from_generator
+
+                _loop_out = run_from_generator(self, kwargs)
+                if _loop_out is not None:
+                    return json.dumps(_loop_out)
+            except Exception as e:  # noqa: BLE001 — never let the loop break generation
+                logger.warning(
+                    f"[UCMV] iterative reconciliation failed ({e}); "
+                    "falling back to single-pass generation."
+                )
+
         # JSON inputs (measures/mquery/config/relationships/scan) are injected into
         # _default_config by the flow handoff. A capable agent, told to "call the
         # tool with ALL inputs", often passes its OWN placeholder for these (e.g.
@@ -225,6 +300,8 @@ class UCMetricViewGeneratorTool(BaseTool):
             "measures_json",
             "mquery_json",
             "config_json",
+            "naming_config",
+            "refinement_feedback",
             "relationships_json",
             "scan_data_json",
             "visual_usage_index",
@@ -518,12 +595,40 @@ class UCMetricViewGeneratorTool(BaseTool):
                 return default
             return json.loads(s)
 
+        # Iterative-reconciliation feedback → DAX LLM. Normalised to
+        # {measure -> hint} and only used when LLM fallback is on.
+        _rf_raw = _get_json("refinement_feedback")
+        if _rf_raw and llm_config is not None:
+            try:
+                from src.services.tools.metric_view_utils.reconciliation import (
+                    feedback_to_prompt_map,
+                )
+
+                _fb_map = feedback_to_prompt_map(_parse_json_input(_rf_raw, None))
+                if _fb_map:
+                    llm_config["refinement_feedback_by_measure"] = _fb_map
+            except Exception as e:  # noqa: BLE001 — feedback is advisory
+                logger.warning(f"[UCMV] Could not parse refinement_feedback: {e}")
+
         try:
             measures = _parse_json_input(measures_raw, [])
             mquery_entries = _parse_json_input(mquery_raw, [])
             config = _parse_json_input(config_raw, {})
         except json.JSONDecodeError as e:
             return json.dumps({"error": f"Invalid JSON input: {e}"})
+
+        # Per-model naming/period vocabulary for the metadata lint + calendar
+        # period-folding (defaults are CCH/Total-SC; only other models need it).
+        # Lands under config["naming_config"] where the pipeline (lint) and
+        # JoinDetector (period) read it.
+        _naming_raw = _get_json("naming_config")
+        if _naming_raw:
+            try:
+                _nc = _parse_json_input(_naming_raw, {})
+                if isinstance(_nc, dict) and _nc:
+                    config["naming_config"] = _nc
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"[UCMV] Failed to parse naming_config: {e}")
 
         # Implicit visual-column measures (from Pipeline Config Generator) ride
         # inside `config`, same bucket shape as switch_decompositions — merge

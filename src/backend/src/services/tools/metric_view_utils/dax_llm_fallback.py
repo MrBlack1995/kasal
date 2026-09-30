@@ -122,8 +122,7 @@ CRITICAL SQL rules for every "sql_expr" (see skill corpus §0 for detail):
 
 # The JSON output contract (shared by corpus + fallback prompts). Adds the
 # 7-category `dax_class` provenance label alongside the existing fields.
-_OUTPUT_CONTRACT = (
-    """
+_OUTPUT_CONTRACT = """
 Classify each measure into exactly one `dax_class`:
 - "translatable_direct": a direct aggregation / simple expression
 - "composed": references other measures via MEASURE()
@@ -141,9 +140,7 @@ ALWAYS respond with valid JSON (no markdown code blocks):
   "confidence": "high"/"medium"/"low",
   "explanation": "brief explanation of the translation",
   "error": "reason if success=false" or null
-}"""
-    + _SQL_RULES
-)
+}""" + _SQL_RULES
 
 # Corpus-backed system prompt when skills are vendored; terse otherwise. The
 # corpus is the STABLE prefix that gets cache_control:ephemeral at call time.
@@ -166,8 +163,7 @@ else:
 # instead of re-sent per measure — Databricks silently drops Anthropic prompt
 # caching, so per-measure calls pay the full corpus every time). It must return a
 # JSON ARRAY, one object per measure, echoing the measure name so results map back.
-_BATCH_OUTPUT_CONTRACT = (
-    """
+_BATCH_OUTPUT_CONTRACT = """
 
 You are given SEVERAL DAX measures in one request. Respond with a SINGLE valid
 JSON ARRAY (no markdown code fences), containing exactly one object per measure
@@ -184,9 +180,7 @@ you were given:
   }
 ]
 Include EVERY measure exactly once. Do not merge, skip, or invent measures.
-Classify each into exactly one dax_class (same definitions as above)."""
-    + _SQL_RULES
-)
+Classify each into exactly one dax_class (same definitions as above).""" + _SQL_RULES
 
 # Corpus-backed batch system prompt (corpus sent ONCE per batch call).
 if _SKILL_CORPUS:
@@ -275,6 +269,7 @@ def _build_batch_user_prompt(
     measures: list[TranslationResult],
     base_names: set[str],
     table_context: str = "",
+    feedback: dict | None = None,
 ) -> str:
     """Build ONE user prompt covering all measures in a batch.
 
@@ -288,7 +283,17 @@ def _build_batch_user_prompt(
     ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
     lines = []
     for i, m in enumerate(measures, start=1):
-        lines.append(f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}")
+        entry = f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}"
+        # Reconciliation feedback (iterative loop): a prior cycle's SQL for this
+        # measure did NOT match Power BI — show the model where it diverged so it
+        # corrects THIS measure rather than repeating the same translation.
+        # Feedback may be keyed by the PBI measure name (original_name) or the
+        # UCMV measure name (measure_name) — reconciliation reports the latter.
+        _fb = feedback or {}
+        hint = _fb.get(m.original_name) or _fb.get(m.measure_name)
+        if hint:
+            entry += f"\n   PREVIOUS ATTEMPT MISMATCHED POWER BI — FIX IT: {hint}"
+        lines.append(entry)
     measures_block = "\n".join(lines)
     # Retrieval: inject deep UCMV-legal references for the long-tail DAX functions
     # this batch uses (skips functions already taught deeply in the cached prefix).
@@ -627,6 +632,7 @@ async def translate_batch_with_llm(
     model: str = "databricks-claude-sonnet-4-5",
     topo_priority: dict[str, int] | None = None,
     table_context: str = "",
+    feedback: dict | None = None,
 ) -> list[TranslationResult]:
     """Attempt LLM translation of a batch of untranslatable measures.
 
@@ -720,7 +726,9 @@ async def translate_batch_with_llm(
                 need_llm.append(m)
 
         if need_llm:
-            prompt = _build_batch_user_prompt(need_llm, snap_names, table_context)
+            prompt = _build_batch_user_prompt(
+                need_llm, snap_names, table_context, feedback
+            )
             # Budget output for the whole batch (each measure ~a few hundred tokens).
             batch_max_tokens = min(len(need_llm) * 400 + 800, 16000)
             response = await _call_llm(

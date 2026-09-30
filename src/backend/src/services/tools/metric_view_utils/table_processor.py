@@ -685,7 +685,7 @@ def process_table(
             if _nm and _nm not in _seen_alias:
                 _seen_alias.add(_nm)
                 _join_aliases.append(_nm)
-        for alias in (getattr(table_info, "dim_source_tables", None) or {}):
+        for alias in getattr(table_info, "dim_source_tables", None) or {}:
             if alias not in _seen_alias:
                 _seen_alias.add(alias)
                 _join_aliases.append(alias)
@@ -719,6 +719,12 @@ def process_table(
                     # Fact-table schema/join context so the LLM uses real column
                     # and alias names instead of guessing.
                     table_context=_table_context,
+                    # Reconciliation feedback from a prior iterative-loop cycle:
+                    # {original_measure_name -> mismatch hint}. Absent on the first
+                    # pass and in non-iterative runs.
+                    feedback=(ctx.llm_config or {}).get(
+                        "refinement_feedback_by_measure"
+                    ),
                 )
             )
             llm_translated = []
@@ -1442,7 +1448,13 @@ def process_table(
             else ""
         ),
         *([] if sw_count == 0 else [f"{sw_count} SWITCH-decomposed measures"]),
-        *([] if ic_count == 0 else [f"{ic_count} aggregated-column measures (visual-only, no PBI measure)"]),
+        *(
+            []
+            if ic_count == 0
+            else [
+                f"{ic_count} aggregated-column measures (visual-only, no PBI measure)"
+            ]
+        ),
         f"{u_count} untranslatable DAX measures (documented below)",
     ]
 

@@ -28,6 +28,7 @@ from .dax_translator import DaxTranslator
 from .join_detector import JoinDetector
 from .m_transform_folder import MTransformFolder
 from .metadata_generator import MetadataGenerator
+from .metadata_lint import LintConfig, lint_metric_view, summarize_findings
 from .pbi_parameter_resolver import PbiParameterResolver
 from .report_emitter import build_proposal, emit_migration_report
 from .sql_emitter import emit_deploy_sql
@@ -905,6 +906,10 @@ class MetricViewPipeline:
             "cross_table_count": len(self.cross_table_measures),
             "filter_warnings": self._filter_warnings,
         }
+        _all_lint_findings: list = []
+        _lint_config = LintConfig.from_dict(
+            (self.config.get("naming_config") or {}).get("lint")
+        )
         for table_key, spec in self.all_specs.items():
             results["specs"][table_key] = {
                 "fact_table_key": spec.fact_table_key,
@@ -983,6 +988,26 @@ class MetricViewPipeline:
                     for m in spec.untranslatable
                 ],
             }
+            # Metadata / naming lint (advisory): flag snake_case, scenario/unit
+            # suffixes, duplicate dimensions and synonym clashes so the migration
+            # owner can fix Genie-facing metadata before deploy. Never fatal.
+            try:
+                _findings = lint_metric_view(spec, _lint_config)
+            except (
+                Exception
+            ):  # noqa: BLE001 — lint is advisory, must never break generation
+                _findings = []
+            if _findings:
+                results["specs"][table_key]["metadata_lint"] = [
+                    {
+                        "rule_id": f.rule_id,
+                        "severity": f.severity,
+                        "field": f.field,
+                        "message": f.message,
+                    }
+                    for f in _findings
+                ]
+                _all_lint_findings.extend(_findings)
         total_measures = sum(
             s.get("total", 0) for k, s in self.stats.items() if k != "__unassigned__"
         )
@@ -1008,6 +1033,13 @@ class MetricViewPipeline:
             "business_pct": (
                 total_translated * 100 // business_scope if business_scope > 0 else 0
             ),
+        }
+        _lint_summary = summarize_findings(_all_lint_findings)
+        results["metadata_lint_summary"] = {
+            "total": _lint_summary.total,
+            "errors": _lint_summary.error_count,
+            "warnings": _lint_summary.warning_count,
+            "by_rule": _lint_summary.by_rule,
         }
         results["limitations"] = self._limitations
         results["migration_report"] = emit_migration_report(

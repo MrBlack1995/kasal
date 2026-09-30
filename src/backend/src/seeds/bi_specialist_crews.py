@@ -359,6 +359,127 @@ UCMV_GEN_CREW = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Crew 2b — UC Metric View Generator (Reconciled)
+# Same generator, but with the iterative reconciliation loop turned ON: after each
+# generation cycle it deploys the metric view and reconciles it cell-by-cell
+# against the live Power BI model, feeding mismatches back to refine failing
+# measures (up to max_reconciliation_cycles or the target %). Because the
+# generator deploys internally each cycle, this crew does NOT need the separate
+# Metric View Deployer step. The operator must fill warehouse_id + reference_years
+# (+ the Power BI credentials the plain generator already needs).
+# ─────────────────────────────────────────────────────────────────────────────
+UCMV_GEN_RECON_AGENT_ID = "bi-ucmv-gen-recon-agent-001"
+UCMV_GEN_RECON_TASK_ID = "bi-ucmv-gen-recon-task-001"
+UCMV_GEN_RECON_CREW_ID = "bi-ucmv-gen-recon-crew-001"
+
+UCMV_GEN_RECON_AGENT = {
+    "id": UCMV_GEN_RECON_AGENT_ID,
+    "name": "UC Metric View Generator (Reconciled) Agent",
+    "role": "UC Metric View Generator (Reconciled)",
+    "goal": (
+        "Generate UC Metric View YAML definitions for all fact tables and refine "
+        "them against the live Power BI model until they reconcile."
+    ),
+    "backstory": (
+        "You are a Databricks UC Metric View specialist. You translate Power BI DAX "
+        "measures into UCMV YAML with the UC Metric View Generator tool, which — in "
+        "this crew — iteratively deploys and reconciles each metric view against the "
+        "live Power BI model and refines the measures that do not match. "
+        "Call the tool with ZERO arguments — all parameters are pre-configured."
+    ),
+    "llm": "databricks-claude-opus-4-8",
+    "tools": [],
+    "tool_configs": {},
+    "max_iter": 10,
+    "max_rpm": 10,
+    # The loop deploys + reconciles every cycle, so allow more wall-clock time.
+    "max_execution_time": 1800,
+    "verbose": True,
+    "allow_delegation": False,
+    "cache": True,
+    "memory": False,
+    "embedder_config": DEFAULT_EMBEDDER,
+    "max_retry_limit": 3,
+}
+
+UCMV_GEN_RECON_TASK = {
+    "id": UCMV_GEN_RECON_TASK_ID,
+    "name": "Generate + reconcile UC Metric View definitions",
+    "description": (
+        "Generate UC Metric View YAML definitions for all fact tables AND reconcile "
+        "them against the live Power BI model.\n\n"
+        "⚠️ CRITICAL: Call the UC Metric View Generator tool with ZERO arguments. "
+        "ALL parameters (credentials, catalog, schema, warehouse_id, reference_years, "
+        "reconciliation settings) are ALREADY PRE-CONFIGURED in the tool-task-form.\n\n"
+        "The tool runs the iterative loop internally (generate → deploy → reconcile → "
+        "refine) and deploys each cycle, so NO separate deployer step is needed. "
+        "Return the complete tool output (per-cycle history + final reconciliation)."
+    ),
+    "expected_output": (
+        "A JSON object with the final UCMV YAML per fact table, the per-cycle "
+        "reconciliation history (overall cell-alignment %, measures at 100%), and "
+        "the stop reason."
+    ),
+    "agent_id": UCMV_GEN_RECON_AGENT_ID,
+    "tools": ["86"],
+    "tool_configs": {
+        "UC Metric View Generator": {
+            "result_as_answer": True,
+            "workspace_id": "",
+            "dataset_id": "",
+            "tenant_id": "",
+            "client_id": "",
+            "client_secret": "",
+            "admin_client_id": "",
+            "admin_client_secret": "",
+            "catalog": "",
+            "schema_name": "",
+            "use_llm_fallback": True,
+            "llm_model": "databricks-claude-sonnet-4-5",
+            # Iterative reconciliation — the operator fills warehouse_id and
+            # reference_years; without them the tool degrades to single-pass.
+            "enable_reconciliation": True,
+            "max_reconciliation_cycles": 5,
+            "reconciliation_target_pct": 100,
+            "warehouse_id": "",
+            "reference_years": "",  # e.g. "[2025, 2026]"
+            # JSON-mode handoff fields (filled by the preceding Pipeline Config crew).
+            "config_json": "{}",
+            "measures_json": "[]",
+            "mquery_json": "[]",
+            "relationships_json": "[]",
+        }
+    },
+    "config": DEFAULT_TASK_CONFIG,
+}
+
+UCMV_GEN_RECON_CREW = {
+    "id": UCMV_GEN_RECON_CREW_ID,
+    "name": "UC Metric View Generator — Reconciled (iterative PBI check)",
+    "process": "sequential",
+    "reasoning": False,
+    "memory": False,
+    "verbose": True,
+    "agent_ids": [UCMV_GEN_RECON_AGENT_ID],
+    "task_ids": [UCMV_GEN_RECON_TASK_ID],
+    "nodes": [
+        _agent_node(UCMV_GEN_RECON_AGENT_ID, UCMV_GEN_RECON_AGENT, 68, 68),
+        _task_node(
+            UCMV_GEN_RECON_TASK_ID,
+            UCMV_GEN_RECON_AGENT_ID,
+            UCMV_GEN_RECON_TASK,
+            368,
+            68,
+        ),
+    ],
+    "edges": [
+        _agent_to_task_edge(
+            "ucmv-gen-recon", UCMV_GEN_RECON_AGENT_ID, UCMV_GEN_RECON_TASK_ID
+        )
+    ],
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Crew 3 — UCMV Quality Validator
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1020,9 +1141,13 @@ UCMV_REEVAL_CREW = {
     "task_ids": [UCMV_REEVAL_TASK_ID],
     "nodes": [
         _agent_node(UCMV_REEVAL_AGENT_ID, UCMV_REEVAL_AGENT, 68, 68),
-        _task_node(UCMV_REEVAL_TASK_ID, UCMV_REEVAL_AGENT_ID, UCMV_REEVAL_TASK, 368, 68),
+        _task_node(
+            UCMV_REEVAL_TASK_ID, UCMV_REEVAL_AGENT_ID, UCMV_REEVAL_TASK, 368, 68
+        ),
     ],
-    "edges": [_agent_to_task_edge("ucmv-reeval", UCMV_REEVAL_AGENT_ID, UCMV_REEVAL_TASK_ID)],
+    "edges": [
+        _agent_to_task_edge("ucmv-reeval", UCMV_REEVAL_AGENT_ID, UCMV_REEVAL_TASK_ID)
+    ],
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1036,6 +1161,11 @@ ALL_CREWS = [
         "task": PIPELINE_CONFIG_TASK,
     },
     {"crew": UCMV_GEN_CREW, "agent": UCMV_GEN_AGENT, "task": UCMV_GEN_TASK},
+    {
+        "crew": UCMV_GEN_RECON_CREW,
+        "agent": UCMV_GEN_RECON_AGENT,
+        "task": UCMV_GEN_RECON_TASK,
+    },
     {"crew": UCMV_VAL_CREW, "agent": UCMV_VAL_AGENT, "task": UCMV_VAL_TASK},
     {"crew": DEPLOYER_CREW, "agent": DEPLOYER_AGENT, "task": DEPLOYER_TASK},
     {"crew": REFERENCES_CREW, "agent": REFERENCES_AGENT, "task": REFERENCES_TASK},

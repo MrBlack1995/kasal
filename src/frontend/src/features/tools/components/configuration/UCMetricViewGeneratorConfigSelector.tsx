@@ -65,8 +65,14 @@ export interface UCMetricViewGeneratorConfig {
   llm_model?: string;
   llm_workspace_url?: string;
   llm_token?: string;
+  // Reconciliation & quality
+  warehouse_id?: string;
+  enable_reconciliation?: boolean;
+  max_reconciliation_cycles?: number;
+  reconciliation_target_pct?: number;
+  naming_config?: string;
   // Index signature for compatibility
-  [key: string]: string | boolean | undefined;
+  [key: string]: string | boolean | number | undefined;
 }
 
 interface UCMetricViewGeneratorConfigSelectorProps {
@@ -85,7 +91,10 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
     clientId: value.oauth_client_id || ''
   });
 
-  const handleFieldChange = (field: keyof UCMetricViewGeneratorConfig, fieldValue: string | boolean) => {
+  // Local validation state for naming_config JSON field
+  const [namingConfigError, setNamingConfigError] = React.useState<string>('');
+
+  const handleFieldChange = (field: keyof UCMetricViewGeneratorConfig, fieldValue: string | boolean | number) => {
     onChange({
       ...value,
       [field]: fieldValue
@@ -731,6 +740,116 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
                 />
               </>
             )}
+          </Box>
+        </AccordionDetails>
+      </Accordion>
+
+      {/* Reconciliation & Metadata Lint */}
+      <Accordion sx={{ mt: 1 }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography variant="subtitle2">
+            Reconciliation &amp; Metadata Lint
+            {value.enable_reconciliation ? ' (enabled)' : ''}
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <TextField
+              label="Databricks SQL warehouse ID"
+              value={value.warehouse_id || ''}
+              onChange={(e) => handleFieldChange('warehouse_id', e.target.value)}
+              disabled={disabled}
+              fullWidth
+              size="small"
+              helperText="Required for reconciliation (queries the deployed metric view)."
+            />
+
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={value.enable_reconciliation || false}
+                  onChange={(e) => handleFieldChange('enable_reconciliation', e.target.checked)}
+                  disabled={disabled}
+                  size="small"
+                />
+              }
+              label={
+                <Box>
+                  <Typography variant="body2">Reconcile against Power BI (iterative)</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    After each generation cycle, deploy the metric view and compare it cell-by-cell against
+                    the live Power BI model; feed mismatches back to the model to refine. Requires a
+                    Databricks warehouse and Power BI credentials above.
+                  </Typography>
+                </Box>
+              }
+            />
+
+            {value.enable_reconciliation && (
+              <Box sx={{ pl: 3, display: 'flex', flexDirection: 'column', gap: 2, borderLeft: '2px solid', borderColor: 'divider' }}>
+                <TextField
+                  label="Max reconciliation cycles"
+                  type="number"
+                  value={value.max_reconciliation_cycles ?? 5}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    if (!isNaN(parsed)) handleFieldChange('max_reconciliation_cycles', Math.min(10, Math.max(1, parsed)));
+                  }}
+                  disabled={disabled}
+                  fullWidth
+                  size="small"
+                  inputProps={{ min: 1, max: 10 }}
+                />
+                <TextField
+                  label="Target cell-alignment %"
+                  type="number"
+                  value={value.reconciliation_target_pct ?? 100}
+                  onChange={(e) => {
+                    const parsed = parseFloat(e.target.value);
+                    if (!isNaN(parsed)) handleFieldChange('reconciliation_target_pct', Math.min(100, Math.max(0, parsed)));
+                  }}
+                  disabled={disabled}
+                  fullWidth
+                  size="small"
+                  inputProps={{ min: 0, max: 100, step: 1 }}
+                  helperText="Stop early once overall cell alignment reaches this percentage."
+                />
+              </Box>
+            )}
+
+            <TextField
+              label="Naming / period config (JSON, optional)"
+              value={value.naming_config || ''}
+              onChange={(e) => {
+                const raw = e.target.value;
+                if (raw.trim() === '') {
+                  setNamingConfigError('');
+                } else {
+                  try {
+                    JSON.parse(raw);
+                    setNamingConfigError('');
+                  } catch {
+                    setNamingConfigError('Invalid JSON — fix before saving.');
+                  }
+                }
+                handleFieldChange('naming_config', raw);
+              }}
+              disabled={disabled}
+              fullWidth
+              multiline
+              rows={4}
+              size="small"
+              error={!!namingConfigError}
+              helperText={
+                namingConfigError ||
+                'Per-model vocabulary for the metadata lint and calendar period-folding — leave blank to use the built-in defaults. ' +
+                'Shape: {"lint": {"scenario_suffixes": [...], "unit_suffixes": [...], "dimension_alias_groups": [[...]]}, ' +
+                '"period": {"column_overrides": {"latest_month_label": "IsCurrentMonth"}}}'
+              }
+              InputProps={{
+                sx: { fontFamily: 'monospace', fontSize: '0.75rem' }
+              }}
+            />
           </Box>
         </AccordionDetails>
       </Accordion>

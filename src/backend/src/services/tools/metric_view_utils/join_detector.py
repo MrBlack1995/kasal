@@ -7,6 +7,12 @@ import re
 
 from .constants import RE_DAX_DIM_REF
 from .data_classes import TableInfo
+from .period_folding import (
+    PeriodConfig,
+    detect_period_columns,
+    fold_period_dimensions,
+    has_closed_period_logic,
+)
 from .utils import col_to_readable
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,10 @@ class JoinDetector:
     def __init__(self, mquery_tables: dict[str, TableInfo], config: dict | None = None):
         self.mquery_tables = mquery_tables
         cfg = config or {}
+        # Per-model period-folding overrides (crew input under config.naming_config.period).
+        self._period_config = PeriodConfig.from_dict(
+            (cfg.get("naming_config") or {}).get("period")
+        )
         self._join_key_map = cfg.get("join_key_map", {})
         self._fact_join_map = cfg.get("fact_join_map", {})
         # P4a: global opt-in to dedup ALL dim joins with a QUALIFY subquery
@@ -505,4 +515,54 @@ class JoinDetector:
                             }
                         )
                     break
-        return dims
+        return self._fold_calendar_period_dims(dims)
+
+    def _fold_calendar_period_dims(self, dims: list[dict]) -> list[dict]:
+        """Fold the report's period logic into this view's dimensions.
+
+        If a joined dimension carries the report's closed-period columns
+        (``Past_flag`` / ``Latest_Month_Label`` / ``Latest_Year_Label``), replace the
+        generic per-column dims with canonical, richly-documented period dimensions
+        (``past_flag``, ``latest_month_label``, ``latest_year_label``, ``fiscper``,
+        ``fiscal_year``, ``fiscal_month``). This runs for EVERY view of the report, so
+        each one answers "this month" / "this year" as a plain filter — the period
+        logic lives in the view, not in a shared cross-report calendar object.
+
+        A no-op unless a joined dimension actually exposes closed-period logic, so
+        plain date dimensions are untouched."""
+        # Group emitted dims by join alias, recording each dim's source column
+        # (the part after "alias.").
+        by_alias: dict = {}
+        for d in dims:
+            expr = d.get("expr", "")
+            if "." in expr:
+                alias, col = expr.split(".", 1)
+                by_alias.setdefault(alias, []).append(col)
+
+        cfg = self._period_config
+        cal_alias = next(
+            (a for a, cols in by_alias.items() if has_closed_period_logic(cols, cfg)),
+            None,
+        )
+        if cal_alias is None:
+            return dims
+
+        cal_cols = by_alias[cal_alias]
+        period_src = set(detect_period_columns(cal_cols, cfg).values())
+        # Drop the generic dims for the calendar's period columns; keep everything
+        # else (including the calendar's non-period columns).
+        kept = [
+            d
+            for d in dims
+            if not (
+                d.get("expr", "").split(".", 1)[0] == cal_alias
+                and d.get("expr", "").split(".", 1)[-1] in period_src
+            )
+        ]
+        kept_names = {d.get("name", "").lower() for d in kept}
+        folded = [
+            f
+            for f in fold_period_dimensions(cal_alias, cal_cols, config=cfg)
+            if f["name"].lower() not in kept_names
+        ]
+        return kept + folded

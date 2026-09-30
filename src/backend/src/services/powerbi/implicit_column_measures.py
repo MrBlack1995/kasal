@@ -119,7 +119,18 @@ def derive_implicit_column_measures(
             "category": "implicit_visual_column",
             "used_in_visuals": occurrences,
             "pbi_kind": "raw_column",
-            "pbi_sources": [{"kind": "raw_column", "table": table, "column": field_name}],
+            # Carry PBI's own SummarizeBy so the reconciliation mapping can emit
+            # pbi_aggregation for non-Sum columns (Average/Count/Min/Max/
+            # DistinctCount); without it, a non-Sum column silently reconciles as
+            # a Sum. See pbi_ucmv_mapping.py.
+            "pbi_sources": [
+                {
+                    "kind": "raw_column",
+                    "table": table,
+                    "column": field_name,
+                    "summarize_by": summarize_by,
+                }
+            ],
         }
         out.setdefault(table, []).append(entry)
 

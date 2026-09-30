@@ -8,6 +8,7 @@ import pytest
 
 from src.services.tools.metric_view_utils.data_classes import TranslationResult
 from src.services.tools.metric_view_utils.dax_llm_fallback import (
+    _build_batch_user_prompt,
     _build_user_prompt,
     _content_hash,
     _parse_response,
@@ -15,6 +16,45 @@ from src.services.tools.metric_view_utils.dax_llm_fallback import (
     translate_batch_with_llm,
     translate_with_llm,
 )
+
+
+def _tr(original_name, dax, measure_name):
+    return TranslationResult(
+        measure_name=measure_name,
+        original_name=original_name,
+        sql_expr=None,
+        is_translatable=False,
+        confidence="low",
+        skip_reason="",
+        dax_expression=dax,
+        category="unassigned",
+    )
+
+
+class TestBatchPromptFeedback:
+    def test_feedback_injected_for_matching_measure(self):
+        measures = [_tr("Total Sales", "SUM(Sales[Amount])", "total_sales")]
+        prompt = _build_batch_user_prompt(
+            measures,
+            {"base_a"},
+            feedback={
+                "total_sales": "only 40.0% matched Power BI; [AT/2025007] UCMV=5 vs PBI=9"
+            },
+        )
+        assert "PREVIOUS ATTEMPT MISMATCHED POWER BI" in prompt
+        assert "40.0%" in prompt
+
+    def test_feedback_matches_by_original_name_too(self):
+        measures = [_tr("Total Sales", "SUM(Sales[Amount])", "total_sales")]
+        prompt = _build_batch_user_prompt(
+            measures, {"base_a"}, feedback={"Total Sales": "was wrong"}
+        )
+        assert "FIX IT: was wrong" in prompt
+
+    def test_no_feedback_no_note(self):
+        measures = [_tr("Total Sales", "SUM(Sales[Amount])", "total_sales")]
+        prompt = _build_batch_user_prompt(measures, {"base_a"})
+        assert "PREVIOUS ATTEMPT" not in prompt
 
 
 class TestHelpers:
@@ -496,8 +536,9 @@ class TestLLMFirstCorpus:
 
         async def go():
             # Force one measure per batch so topo ordering yields distinct calls.
-            with patch.object(d, "_call_llm", new=fake_call), patch.object(
-                d, "_DAX_LLM_BATCH_SIZE", 1
+            with (
+                patch.object(d, "_call_llm", new=fake_call),
+                patch.object(d, "_DAX_LLM_BATCH_SIZE", 1),
             ):
                 # child listed first, but topo_priority puts parent (rank 0) before child (rank 1)
                 await d.translate_batch_with_llm(
