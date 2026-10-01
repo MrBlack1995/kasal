@@ -730,6 +730,14 @@ class UCMetricViewGeneratorTool(BaseTool):
         except json.JSONDecodeError as e:
             return json.dumps({"error": f"Invalid JSON input: {e}"})
 
+        # Cross-fact UNION sources are emitted ONLY inside the reconciliation loop,
+        # where PBI validates the numbers cell-by-cell. This generation IS the
+        # in-loop one when `_in_recon_loop` is set (the iterative runner re-invokes
+        # the tool with it). Off → no combined sources, no silently-wrong cross-fact
+        # numbers (see cross_table_source_planner).
+        if kwargs.get("_in_recon_loop"):
+            config["reconciliation_active"] = True
+
         # Per-model naming/period vocabulary for the metadata lint + calendar
         # period-folding (defaults are CCH/Total-SC; only other models need it).
         # Lands under config["naming_config"] where the pipeline (lint) and

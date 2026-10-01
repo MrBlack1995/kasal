@@ -484,6 +484,26 @@ class MetricViewPipeline:
         if unassigned:
             self._collect_unassigned(unassigned)
 
+        # Cross-fact measures (span 2 facts): build same-grain UNION combined
+        # sources and translate them via the normal path — but ONLY when
+        # reconciliation is active to validate the numbers (see
+        # cross_table_source_planner). Off → leave them collected, as before.
+        if self.config.get("reconciliation_active"):
+            try:
+                from .cross_table_source_planner import plan_cross_table_sources
+
+                _xspecs, _xlims = plan_cross_table_sources(self)
+                for _k, _spec in _xspecs.items():
+                    self.all_specs[_k] = _spec
+                if _xlims:
+                    self._limitations.setdefault("cross_table_deferred", []).extend(
+                        _xlims
+                    )
+            except Exception as e:  # noqa: BLE001 — never break generation
+                logger.warning(
+                    "[MetricViewPipeline] cross-table planning skipped: %s", e
+                )
+
         return self.all_specs
 
     # ── _process_table() — delegates to table_processor module ────────
