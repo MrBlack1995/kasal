@@ -215,16 +215,22 @@ def test_generator_delegates_when_flag_set():
                 enable_reconciliation=True,
                 warehouse_id="wh123",
                 reference_years="[2025, 2026]",
+                # Reconciliation needs the Power BI side too: workspace + dataset
+                # + credentials. Without these the gate skips (see the skip-reason
+                # tests below) and never delegates.
+                workspace_id="ws1",
+                dataset_id="ds1",
+                access_token="tok",
             )
         )
     assert out["stop_reason"] == "target_reached"
 
 
 def test_generator_surfaces_skip_reason_when_required_input_missing():
-    """Reconciliation requested (flag on) but the required warehouse_id is
-    missing → does NOT silently single-pass: the generator surfaces
-    reconciliation_skipped naming the missing field, and never calls the loop.
-    (reference_years is optional, so its absence does NOT trigger a skip.)"""
+    """Reconciliation requested (flag on) but every required input is missing →
+    does NOT silently single-pass: the generator surfaces reconciliation_skipped
+    naming each missing field, and never calls the loop. (reference_years is
+    optional, so its absence does NOT trigger a skip.)"""
     from src.services.tools.uc_metric_view_generator_tool import (
         UCMetricViewGeneratorTool,
     )
@@ -234,10 +240,46 @@ def test_generator_surfaces_skip_reason_when_required_input_missing():
         "src.services.tools.ucmv_iterative_recon.run_from_generator"
     ) as mock_bridge:
         out = json.loads(tool._run(enable_reconciliation=True))
-    mock_bridge.assert_not_called()  # no delegation when the warehouse is absent
+    mock_bridge.assert_not_called()  # no delegation when prerequisites are absent
     assert "stop_reason" not in out
-    assert out.get("reconciliation_skipped")
-    assert "warehouse_id" in out["reconciliation_skipped"]
+    reason = out.get("reconciliation_skipped")
+    assert reason
+    # Names BOTH sides so the operator knows exactly what to fill, not a generic
+    # "deploy failed".
+    assert "warehouse_id" in reason
+    assert "workspace_id" in reason
+    assert "dataset_id" in reason
+    assert "credentials" in reason.lower()
+
+
+def test_generator_skips_when_only_warehouse_present_pbi_creds_missing():
+    """The customer's real case: warehouse_id (and reference_years) filled, but no
+    Power BI workspace/dataset/credentials → reconciliation cannot reach the PBI
+    ground-truth side, so it is skipped with a reason that names the PBI gaps
+    (NOT delegated to the loop, which would deploy then fail every view on
+    'pbi_workspace_id is required')."""
+    from src.services.tools.uc_metric_view_generator_tool import (
+        UCMetricViewGeneratorTool,
+    )
+
+    tool = UCMetricViewGeneratorTool()
+    with patch(
+        "src.services.tools.ucmv_iterative_recon.run_from_generator"
+    ) as mock_bridge:
+        out = json.loads(
+            tool._run(
+                enable_reconciliation=True,
+                warehouse_id="wh123",
+                reference_years="[2025, 2026]",
+            )
+        )
+    mock_bridge.assert_not_called()
+    reason = out.get("reconciliation_skipped")
+    assert reason
+    assert "warehouse_id" not in reason  # the one thing they DID provide
+    assert "workspace_id" in reason
+    assert "dataset_id" in reason
+    assert "credentials" in reason.lower()
 
 
 def test_generator_delegates_on_warehouse_id_without_reference_years():
@@ -253,7 +295,14 @@ def test_generator_delegates_on_warehouse_id_without_reference_years():
         "src.services.tools.ucmv_iterative_recon.run_from_generator",
         return_value={"stop_reason": "max_cycles", "best_pct": 97},
     ):
-        out = json.loads(tool._run(warehouse_id="wh123"))
+        out = json.loads(
+            tool._run(
+                warehouse_id="wh123",
+                workspace_id="ws1",
+                dataset_id="ds1",
+                access_token="tok",
+            )
+        )
     assert out["stop_reason"] == "max_cycles"
 
 
@@ -268,5 +317,18 @@ def test_generator_single_pass_when_bridge_returns_none():
     with patch(
         "src.services.tools.ucmv_iterative_recon.run_from_generator", return_value=None
     ):
-        out = json.loads(tool._run(enable_reconciliation=True))
+        # Full recon prereqs so the gate delegates to the (patched) bridge; the
+        # non-empty measures/mquery keep generation in JSON mode (no live API
+        # extraction, which workspace_id+dataset_id would otherwise trigger).
+        out = json.loads(
+            tool._run(
+                enable_reconciliation=True,
+                warehouse_id="wh123",
+                workspace_id="ws1",
+                dataset_id="ds1",
+                access_token="tok",
+                measures_json='[{"name": "sales", "expression": "SUM(S[a])", "table": "S"}]',
+                mquery_json='[{"table": "S", "expression": "let x=1 in x"}]',
+            )
+        )
     assert "stop_reason" not in out

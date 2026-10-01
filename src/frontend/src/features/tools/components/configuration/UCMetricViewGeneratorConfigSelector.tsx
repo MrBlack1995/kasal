@@ -30,6 +30,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import ClearIcon from '@mui/icons-material/Clear';
 import { usePowerBIOAuth } from '../../../../hooks/usePowerBIOAuth';
+import { PowerBIReconConnectionFields } from './PowerBIReconConnectionFields';
 
 // Authentication method type
 export type PowerBIAuthMethod = 'service_principal' | 'service_account' | 'user_oauth';
@@ -774,7 +775,7 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
               fullWidth
               size="small"
               placeholder="[2025, 2026]"
-              helperText="Required for reconciliation — the fiscal year(s) to compare cell-by-cell, e.g. [2025, 2026]. Without it, reconciliation is skipped."
+              helperText="Optional — the fiscal year(s) to compare cell-by-cell, e.g. [2025, 2026]. Leave blank to compare across all years."
             />
 
             <FormControlLabel
@@ -791,8 +792,9 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
                   <Typography variant="body2">Reconcile against Power BI (iterative)</Typography>
                   <Typography variant="caption" color="text.secondary">
                     After each generation cycle, deploy the metric view and compare it cell-by-cell against
-                    the live Power BI model; feed mismatches back to the model to refine. Requires the
-                    Databricks warehouse, reference years, and Power BI credentials above.
+                    the live Power BI model; feed mismatches back to the model to refine. Requires a
+                    Databricks SQL warehouse and Power BI credentials (workspace&nbsp;ID, dataset&nbsp;ID,
+                    and authentication — entered below in JSON mode). Reference years are optional.
                   </Typography>
                 </Box>
               }
@@ -800,6 +802,21 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
 
             {value.enable_reconciliation && (
               <Box sx={{ pl: 3, display: 'flex', flexDirection: 'column', gap: 2, borderLeft: '2px solid', borderColor: 'divider' }}>
+                {mode === 'json' ? (
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'rgb(156, 39, 176)' }}>
+                      Power BI connection (reconciliation ground truth)
+                    </Typography>
+                    <PowerBIReconConnectionFields value={value} onChange={onChange} disabled={disabled} />
+                  </Box>
+                ) : (
+                  <Alert severity="info" variant="outlined">
+                    <Typography variant="caption">
+                      Reconciliation uses the Power BI credentials from the <strong>Power BI Workspace
+                      Configuration</strong> above (workspace&nbsp;ID, dataset&nbsp;ID, and authentication).
+                    </Typography>
+                  </Alert>
+                )}
                 <TextField
                   label="Max reconciliation cycles"
                   type="number"

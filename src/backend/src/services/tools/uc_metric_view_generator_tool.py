@@ -304,13 +304,23 @@ class UCMetricViewGeneratorTool(BaseTool):
         _recon_skipped = None
         _recon_requested = _get("enable_reconciliation") or _get("warehouse_id")
         if _recon_requested and not kwargs.get("_in_recon_loop"):
-            _missing = [n for n in ("warehouse_id",) if not _get(n)]
+            # Reconciliation needs BOTH sides: a Databricks SQL warehouse (to
+            # deploy + query the view) AND a Power BI connection + credentials (to
+            # pull the ground-truth numbers). A warehouse alone is NOT enough — with
+            # no PBI creds the loop deploys the view then fails every one on
+            # "pbi_workspace_id is required", which surfaces as a generic "deploy
+            # failed". Name exactly what is missing so the UI/history says why.
+            from src.services.tools.metric_view_utils.reconciliation_prereqs import (
+                missing_reconciliation_inputs,
+            )
+
+            _missing = missing_reconciliation_inputs(_get)
             if _missing:
                 _recon_skipped = (
-                    "Reconciliation was requested but did NOT run — missing required "
-                    f"input(s): {', '.join(_missing)}. Provide a Databricks SQL "
-                    "warehouse ID (and Power BI credentials) to enable the live "
-                    "cell-by-cell check; generation ran single-pass."
+                    "Reconciliation was requested but did NOT run — missing: "
+                    f"{'; '.join(_missing)}. Fill these in the UC Metric View "
+                    "Generator's Reconciliation tab to enable the live cell-by-cell "
+                    "Power BI check; generation ran single-pass."
                 )
                 logger.warning(f"[UCMV] {_recon_skipped}")
             else:
