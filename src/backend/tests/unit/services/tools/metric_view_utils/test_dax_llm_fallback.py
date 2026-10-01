@@ -656,3 +656,23 @@ class TestDomainContextInjection:
             [m], {"a"}, table_context="tc"
         )
         assert "Domain context" not in _build_user_prompt("Sales", "SUM(x)", {"a"}, {})
+
+
+class TestTimeIntelligenceRule:
+    """The DAX-LLM is told time-intelligence is translatable via window functions,
+    not auto-declined as architecture_change."""
+
+    def test_sql_rules_cover_time_intelligence(self):
+        from src.services.tools.metric_view_utils.dax_llm_fallback import _SQL_RULES
+
+        assert "TIME-INTELLIGENCE" in _SQL_RULES
+        assert "SAMEPERIODLASTYEAR" in _SQL_RULES
+        assert "LAG(" in _SQL_RULES
+        assert "do NOT decline" in _SQL_RULES
+
+    def test_time_intelligence_rule_reaches_the_system_prompt(self):
+        from src.services.tools.metric_view_utils import dax_llm_fallback as m
+
+        # _SQL_RULES is appended to the output contract, which is part of the
+        # system prompt (corpus-backed or terse) — so the guidance is actually sent.
+        assert "TIME-INTELLIGENCE" in m._OUTPUT_CONTRACT

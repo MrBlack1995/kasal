@@ -118,7 +118,20 @@ CRITICAL SQL rules for every "sql_expr" (see skill corpus §0 for detail):
    score and counts distinct ids per group, then sums, is counting DISTINCT
    (score, id) PAIRS — emit
    `COUNT(DISTINCT CASE WHEN <cond> THEN concat(CAST(source.score AS STRING),'|',CAST(source.id AS STRING)) END)`,
-   never a row-level SUM or a product of counts."""
+   never a row-level SUM or a product of counts.
+5. TIME-INTELLIGENCE IS TRANSLATABLE — do NOT decline it as architecture_change
+   when a period/date/fiscal column is present in the fact-table context. Prior
+   year/period, YTD, QTD, MTD and the DAX functions SAMEPERIODLASTYEAR, DATEADD,
+   PARALLELPERIOD, PREVIOUSYEAR, TOTALYTD/DATESYTD map to a WINDOW FUNCTION over the
+   period column — this is single-source and needs NO subquery and NO new table:
+     - prior period:  LAG(SUM(source.<x>)) OVER (ORDER BY source.<period>)
+     - prior year:    LAG(SUM(source.<x>), <periods_per_year>) OVER (ORDER BY source.<period>)
+     - YTD:           SUM(SUM(source.<x>)) OVER (PARTITION BY source.<year> ORDER BY source.<period>)
+   Use the period/fiscal column shown in the context (e.g. fiscper, fiscal_year).
+   A declared calendar join aliased on a prior-period key (e.g. date_py) is also
+   permitted — declared join aliases are always legal. See the skill corpus
+   WINDOW.md and UNSUPPORTED.md. Only decline (architecture_change) when NO
+   period/date column is available at all."""
 
 # The JSON output contract (shared by corpus + fallback prompts). Adds the
 # 7-category `dax_class` provenance label alongside the existing fields.

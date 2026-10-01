@@ -157,3 +157,26 @@ class TestPeriodConfigOverride:
         assert cfg.column_overrides == {}
         # defaults still detect standard columns
         assert has_closed_period_logic(["Past_flag"], cfg) is True
+
+
+class TestDetectPriorPeriodColumn:
+    """Prior-period key detection (phase-2 time-intelligence self-join)."""
+
+    def test_detects_date_py_and_variants(self):
+        from src.services.tools.metric_view_utils.period_folding import (
+            detect_prior_period_column,
+        )
+
+        assert detect_prior_period_column(["date_id", "date_py"]) == "date_py"
+        assert detect_prior_period_column(["Fiscper_PY", "x"]) == "Fiscper_PY"
+        assert detect_prior_period_column(["py_fiscper"]) == "py_fiscper"
+        assert detect_prior_period_column(["prev_year_date"]) == "prev_year_date"
+
+    def test_none_when_no_prior_period_column(self):
+        from src.services.tools.metric_view_utils.period_folding import (
+            detect_prior_period_column,
+        )
+
+        assert detect_prior_period_column(["date_id", "fiscper", "year"]) is None
+        assert detect_prior_period_column([]) is None
+        assert detect_prior_period_column(None) is None

@@ -258,3 +258,30 @@ def fold_period_dimensions(
             }
         )
     return out
+
+
+# A calendar column that already holds the matching date/period of the PRIOR
+# year/period — so a prior-year measure is a calendar self-join on this key rather
+# than a date-shift computation (the exact lookup the DAX-LLM time-intelligence
+# rule and the skill corpus point at). date_py, fiscper_py, py_date, prev_year, …
+# Matched against the RAW lower-cased name (not _norm, which strips the separators
+# the `_py` / `py_` conventions rely on).
+_PRIOR_PERIOD_RE = re.compile(
+    r"(_py$|^py_|prior[_]?(year|period|date|month)|"
+    r"prev(ious)?[_]?(year|period|date|month)|(last|ly)[_]?year)"
+)
+
+
+def detect_prior_period_column(available_columns) -> "str | None":
+    """Return a calendar column holding the PRIOR-period/year key, or None.
+
+    Phase-2 time-intelligence can self-join the calendar on this to resolve
+    SAMEPERIODLASTYEAR exactly (vs the window-function fallback the DAX-LLM uses
+    when it is absent).
+    """
+    for col in available_columns or []:
+        if not isinstance(col, str) or not col.strip():
+            continue
+        if _PRIOR_PERIOD_RE.search(col.strip().lower()):
+            return col
+    return None
