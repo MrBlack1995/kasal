@@ -203,12 +203,28 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _domain_context_block(domain_context: str) -> str:
+    """Render the optional customer-supplied domain-context block.
+
+    Free text (vocabulary, business rules, fiscal-calendar quirks, cost-accounting
+    terms). Goes in the VARIABLE user message like ``table_context``, so the
+    cached skill-corpus prefix stays reusable. Empty string when none supplied.
+    """
+    if not domain_context:
+        return ""
+    return (
+        "\n## Domain context (customer-supplied — authoritative business "
+        f"semantics for this model)\n{domain_context}\n"
+    )
+
+
 def _build_user_prompt(
     measure_name: str,
     dax_expression: str,
     base_names: set[str],
     original_to_snake: dict[str, str],
     table_context: str = "",
+    domain_context: str = "",
 ) -> str:
     """Build the user prompt with context.
 
@@ -217,14 +233,18 @@ def _build_user_prompt(
     It goes in the VARIABLE user message (not the cached skill prefix) so the
     LLM emits real column/join names instead of guessing — while the corpus
     stays cacheable. Stable within a table, so cheap relative to the corpus.
+
+    ``domain_context`` is optional customer-supplied business context, appended
+    the same way (see ``_domain_context_block``).
     """
     available_measures = ", ".join(
         sorted(base_names)[:50]
     )  # cap at 50 for token efficiency
     ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
+    dc_block = _domain_context_block(domain_context)
 
     return f"""Translate this DAX measure to Spark SQL for a UC Metric View.
-{ctx_block}
+{ctx_block}{dc_block}
 ## Measure
 Name: {measure_name}
 
@@ -236,6 +256,7 @@ Name: {measure_name}
 
 ## Instructions
 - Use ONLY the source columns / join aliases listed in the fact table context above; do not invent column names.
+- Honour the domain context above (terminology, business rules, calendar) when interpreting the measure's intent.
 - If referencing another measure, use MEASURE(snake_case_name)
 - Column references: source.column_name (fact) or alias.column_name (joined dimension)
 - Return JSON with success, sql_expr, dax_class, confidence, explanation"""
@@ -270,6 +291,7 @@ def _build_batch_user_prompt(
     base_names: set[str],
     table_context: str = "",
     feedback: dict | None = None,
+    domain_context: str = "",
 ) -> str:
     """Build ONE user prompt covering all measures in a batch.
 
@@ -281,6 +303,7 @@ def _build_batch_user_prompt(
     """
     available_measures = ", ".join(sorted(base_names)[:50])
     ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
+    dc_block = _domain_context_block(domain_context)
     lines = []
     for i, m in enumerate(measures, start=1):
         entry = f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}"
@@ -300,7 +323,7 @@ def _build_batch_user_prompt(
     # Goes in the VARIABLE user message so the corpus prefix stays cacheable.
     func_refs = render_function_refs(m.dax_expression for m in measures)
     return f"""Translate the following {len(measures)} DAX measures to Spark SQL for a UC Metric View, using the shared fact-table context below.
-{ctx_block}
+{ctx_block}{dc_block}
 ## Available MEASURE() references (already translated)
 {available_measures}
 {func_refs}
@@ -309,6 +332,7 @@ def _build_batch_user_prompt(
 
 ## Instructions
 - Use ONLY the source columns / join aliases listed in the fact table context above; do not invent column names.
+- Honour the domain context above (terminology, business rules, calendar) when interpreting each measure's intent.
 - If referencing another measure, use MEASURE(snake_case_name)
 - Column references: source.column_name (fact) or alias.column_name (joined dimension)
 - Return a JSON ARRAY with one object per measure, echoing "measure_name" exactly as given."""
@@ -501,6 +525,7 @@ async def translate_with_llm(
     model: str = "databricks-claude-sonnet-4-5",
     cache: OrderedDict | None = None,
     table_context: str = "",
+    domain_context: str = "",
 ) -> TranslationResult:
     """Attempt LLM translation of a single untranslatable measure.
 
@@ -539,6 +564,7 @@ async def translate_with_llm(
         base_names,
         original_to_snake,
         table_context=table_context,
+        domain_context=domain_context,
     )
 
     # Inject a deep, UCMV-legal reference for the long-tail DAX functions THIS
@@ -633,6 +659,7 @@ async def translate_batch_with_llm(
     topo_priority: dict[str, int] | None = None,
     table_context: str = "",
     feedback: dict | None = None,
+    domain_context: str = "",
 ) -> list[TranslationResult]:
     """Attempt LLM translation of a batch of untranslatable measures.
 
@@ -727,7 +754,7 @@ async def translate_batch_with_llm(
 
         if need_llm:
             prompt = _build_batch_user_prompt(
-                need_llm, snap_names, table_context, feedback
+                need_llm, snap_names, table_context, feedback, domain_context
             )
             # Budget output for the whole batch (each measure ~a few hundred tokens).
             batch_max_tokens = min(len(need_llm) * 400 + 800, 16000)
@@ -753,6 +780,7 @@ async def translate_batch_with_llm(
                             model=model,
                             cache=run_cache,
                             table_context=table_context,
+                            domain_context=domain_context,
                         )
                         for m in need_llm
                     )

@@ -74,6 +74,7 @@ export interface UCMetricViewGeneratorConfig {
   reconciliation_target_pct?: number;
   prune_non_visual_measures?: boolean;
   naming_config?: string;
+  domain_context?: string;
   // Index signature for compatibility
   [key: string]: string | boolean | number | undefined;
 }
@@ -743,6 +744,58 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
                 />
               </>
             )}
+          </Box>
+        </AccordionDetails>
+      </Accordion>
+
+      {/* Domain context (customer-supplied) — fed into the DAX→SQL translation */}
+      <Accordion sx={{ mt: 1 }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography variant="subtitle2">
+            Domain context (optional){value.domain_context ? ' ✓' : ''}
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Paste your model&apos;s domain knowledge — business/metric vocabulary, naming
+              conventions, fiscal-calendar quirks, cost-accounting terms. It&apos;s fed verbatim into
+              the DAX→SQL translation so the LLM translates with your business semantics (needs LLM
+              fallback on). The greyed text is a template showing the shape — type over it, or clear
+              it for a blank field.
+            </Typography>
+            <TextField
+              label="Domain context"
+              value={value.domain_context || ''}
+              onChange={(e) => handleFieldChange('domain_context', e.target.value)}
+              disabled={disabled}
+              fullWidth
+              multiline
+              rows={14}
+              size="small"
+              placeholder={`# Domain context — <your model / report name>
+
+Fiscal calendar: describe it (e.g. 4-4-5). Define how "YTD <year>" is computed
+(e.g. periods 001..latest closed month) and any period-column overrides
+(e.g. latest_month_label → IsCurrentMonth).
+
+Vocabulary / acronyms (one per line):
+- <ACRONYM> = <what it means in this model>
+- <ACRONYM> = <what it means in this model>
+
+Measure / naming conventions:
+- Scenario suffixes, e.g. "… PY" = prior year, "… Bud" = budget, "… Act" = actual.
+- Units, e.g. volumes are counts unless suffixed _hl (hectolitres).
+- Business rules, e.g. prefer booked/stored columns over recomputing from components.
+
+Key dimensions and their members:
+- <dimension>: '<member1>','<member2>', …
+- Regions / entities: '<region1>','<region2>', …`}
+              helperText="Optional free text (README/notes style). Leave blank to use none."
+              InputProps={{
+                sx: { fontFamily: 'monospace', fontSize: '0.75rem' }
+              }}
+            />
           </Box>
         </AccordionDetails>
       </Accordion>

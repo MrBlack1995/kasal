@@ -624,3 +624,35 @@ class TestTableContext:
         asyncio.run(go())
         # different table context → two distinct cache keys → two LLM calls
         assert calls["n"] == 2
+
+
+class TestDomainContextInjection:
+    """Customer-supplied free-text domain context is appended to the translation
+    prompt (both single and batch) and omitted cleanly when absent."""
+
+    def test_single_prompt_includes_domain_context(self):
+        prompt = _build_user_prompt(
+            "Sales",
+            "SUM(x)",
+            {"a"},
+            {},
+            table_context="tc",
+            domain_context="CTS = cost to supply; fiscal calendar is 4-4-5",
+        )
+        assert "Domain context" in prompt
+        assert "CTS = cost to supply" in prompt
+
+    def test_batch_prompt_includes_domain_context(self):
+        m = _tr("Sales", "SUM(x)", "sales")
+        prompt = _build_batch_user_prompt(
+            [m], {"a"}, table_context="tc", domain_context="POH = production overhead"
+        )
+        assert "Domain context" in prompt
+        assert "POH = production overhead" in prompt
+
+    def test_no_domain_context_omits_the_block(self):
+        m = _tr("Sales", "SUM(x)", "sales")
+        assert "Domain context" not in _build_batch_user_prompt(
+            [m], {"a"}, table_context="tc"
+        )
+        assert "Domain context" not in _build_user_prompt("Sales", "SUM(x)", {"a"}, {})

@@ -158,6 +158,31 @@ DEFAULT_TASK_CONFIG = {
     "output_json": "true",
 }
 
+# Neutral, ready-to-edit example of the UC Metric View Generator's optional
+# `domain_context` field: free-text model knowledge fed verbatim into the DAX→SQL
+# translation prompt so the LLM translates with the model's business semantics.
+# This is a TEMPLATE showing the shape — replace each line with your own model's
+# calendar, vocabulary, naming conventions and dimension members.
+EXAMPLE_DOMAIN_CONTEXT = """# Domain context — <your model / report name>
+
+Fiscal calendar: describe it (e.g. 4-4-5). Define how "YTD <year>" is computed
+(e.g. periods 001..latest closed month) and any period-column overrides
+(e.g. latest_month_label → IsCurrentMonth).
+
+Vocabulary / acronyms (one per line):
+- <ACRONYM> = <what it means in this model>
+- <ACRONYM> = <what it means in this model>
+
+Measure / naming conventions:
+- Scenario suffixes, e.g. "… PY" = prior year, "… Bud" = budget, "… Act" = actual.
+- Units, e.g. volumes are counts unless suffixed _hl (hectolitres).
+- Business rules, e.g. prefer booked/stored columns over recomputing from components.
+
+Key dimensions and their members:
+- <dimension>: '<member1>','<member2>', …
+- Regions / entities: '<region1>','<region2>', …
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Crew 1 — Pipeline Config Generator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -331,6 +356,9 @@ UCMV_GEN_TASK = {
             # any visual (directly or via a dependency chain). Needs the report's
             # visual-usage data; no-op without it. Base measures always kept.
             "prune_non_visual_measures": False,
+            # Optional free-text model knowledge fed into the DAX→SQL translation.
+            # Ships as a neutral template to edit (or clear) per model.
+            "domain_context": EXAMPLE_DOMAIN_CONTEXT,
             # JSON mode: the flow injects the preceding Pipeline Config crew's
             # output into these fields (config_json ← proposed_config,
             # measures_json/mquery_json ← the handoff arrays it now emits). They
@@ -452,6 +480,9 @@ UCMV_GEN_RECON_TASK = {
             # any visual (directly or via a dependency chain) — needs the report's
             # visual-usage data; no-op without it. Base measures always kept.
             "prune_non_visual_measures": False,
+            # Optional free-text model knowledge fed into the DAX→SQL translation.
+            # Ships as a neutral template to edit (or clear) per model.
+            "domain_context": EXAMPLE_DOMAIN_CONTEXT,
             # JSON-mode handoff fields (filled by the preceding Pipeline Config crew).
             "config_json": "{}",
             "measures_json": "[]",

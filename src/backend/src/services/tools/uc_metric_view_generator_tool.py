@@ -70,6 +70,17 @@ class UCMetricViewGeneratorSchema(BaseModel):
             '{"latest_month_label": "IsCurrentMonth", ...}}}.'
         ),
     )
+    domain_context: Optional[str] = Field(
+        None,
+        description=(
+            "OPTIONAL free text (not JSON): the model's domain knowledge — "
+            "business/metric vocabulary, naming conventions, fiscal-calendar "
+            "quirks (e.g. 4-4-5), cost-accounting terms — fed verbatim into the "
+            "DAX→SQL translation prompt so the LLM translates with the model's "
+            "business semantics. Paste a README/notes blurb; blank = none. Only "
+            "used when LLM fallback is on."
+        ),
+    )
     implicit_column_measures: Optional[str] = Field(
         None,
         description=(
@@ -232,6 +243,7 @@ class UCMetricViewGeneratorTool(BaseTool):
             "implicit_column_measures",
             "config_json",
             "naming_config",
+            "domain_context",
             "refinement_feedback",
             "enable_reconciliation",
             "max_reconciliation_cycles",
@@ -481,11 +493,20 @@ class UCMetricViewGeneratorTool(BaseTool):
             isinstance(relationships_raw, str)
             and relationships_raw.strip() in ("", "[]", "null")
         )
+        # Visual usage can be absent even when measures/mquery arrived — the flow
+        # handoff drops it independently, and it is NOT persisted as its own
+        # column. Trigger the extraction lookup for it too, so it can be
+        # re-derived from the persisted report_definition below.
+        _vu_raw_missing = (not visual_usage_raw) or (
+            isinstance(visual_usage_raw, str)
+            and visual_usage_raw.strip() in ("", "{}", "[]", "null")
+        )
         if (
             measures_raw == "[]"
             or mquery_raw == "[]"
             or config_raw == "{}"
             or _rel_raw_missing
+            or _vu_raw_missing
         ):
             try:
                 from src.services.execution.kernel.trace_context import (
@@ -576,6 +597,34 @@ class UCMetricViewGeneratorTool(BaseTool):
                                 "[UCMV] DB fallback: rebuilt relationships_json "
                                 f"({len(_db_relationships)} relationships)"
                             )
+                        # Visual usage has no column of its own, but the raw
+                        # report_definition IS persisted — re-derive the index from
+                        # it when the handoff dropped it, so used_in_visuals / the
+                        # "Used on" column / the visual-usage triage don't silently
+                        # vanish on an empty handoff.
+                        _db_report_def = getattr(_extraction, "report_definition", None)
+                        if _vu_raw_missing and _db_report_def:
+                            try:
+                                from src.services.powerbi.visual_usage import (
+                                    derive_visual_usage_index,
+                                )
+
+                                _rebuilt_vu = derive_visual_usage_index(_db_report_def)
+                                if _rebuilt_vu:
+                                    visual_usage_raw = json.dumps(_rebuilt_vu)
+                                    _diag["db_fallback_fired_for"].append(
+                                        "visual_usage_index"
+                                    )
+                                    logger.info(
+                                        "[UCMV] DB fallback: re-derived "
+                                        f"visual_usage_index ({len(_rebuilt_vu)} "
+                                        "field(s)) from persisted report_definition"
+                                    )
+                            except Exception as _vu_err:  # noqa: BLE001
+                                logger.warning(
+                                    "[UCMV] DB fallback: visual_usage re-derive "
+                                    f"failed: {_vu_err}"
+                                )
                 except Exception as _db_err:
                     _diag["db_fallback_error"] = str(_db_err)
                     logger.warning(f"[UCMV] DB fallback failed: {_db_err}")
@@ -642,6 +691,13 @@ class UCMetricViewGeneratorTool(BaseTool):
                 # the prior regex-primary behaviour.
                 "translation_mode": _get("translation_mode") or "llm_first",
             }
+            # Customer-supplied domain context (free text) → the DAX→SQL
+            # translation prompt, so the LLM translates with the model's business
+            # semantics. Advisory and fail-open; only meaningful when LLM fallback
+            # is on, which is why it rides llm_config.
+            _dc = _get("domain_context")
+            if isinstance(_dc, str) and _dc.strip():
+                llm_config["domain_context"] = _dc.strip()
 
         def _parse_json_input(raw, default):
             """Parse a JSON input; treat empty/blank as the default (never error)."""
@@ -703,40 +759,58 @@ class UCMetricViewGeneratorTool(BaseTool):
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(f"[UCMV] Failed to parse implicit_column_measures: {e}")
 
+        # Capture the ORIGINAL source expression per table BEFORE the M→SQL LLM
+        # recovery below rewrites it, so the UI can show the FULL raw Power Query M
+        # (not just the derived Source SQL) and audit which transformation steps it
+        # carries. Keyed by PBI table_name; mapped to the emit table_key later.
+        _raw_source_by_name: dict = {}
+        if isinstance(mquery_entries, list):
+            for _e in mquery_entries:
+                if isinstance(_e, dict) and _e.get("table_name"):
+                    _raw_source_by_name[str(_e["table_name"])] = str(
+                        _e.get("transpiled_sql") or ""
+                    )
+
         # ── Raw Power Query M → SQL source recovery (opt-in) ────────────────
         # When a table's source is raw M (`let ... in ...`) with no embedded
         # native SQL, MQueryParser cannot extract a FROM clause → the table is
         # neither a fact nor has a source → 0 views. If LLM fallback is enabled,
         # rewrite those entries' transpiled_sql to a Spark SQL SELECT the parser
         # CAN read. Fail-open: entries the LLM can't translate are left as-is.
+        # Hoisted so the post-emit safety net can tell "no raw-M tables" from "raw-M
+        # tables whose LLM source-recovery produced nothing" (the shape of an LLM
+        # failure — provider routing / FMAPI throttle / timeout — that otherwise
+        # reads as a silent 0 views).
+        _raw_m_count = 0
+        _raw_m_recovered = 0
         if use_llm and isinstance(mquery_entries, list) and mquery_entries:
             try:
                 from src.services.tools.metric_view_utils.mquery_parser import (
                     looks_like_raw_mquery,
                 )
 
-                raw_m_count = sum(
+                _raw_m_count = sum(
                     1
                     for e in mquery_entries
                     if isinstance(e, dict)
                     and looks_like_raw_mquery(e.get("transpiled_sql") or "")
                 )
-                if raw_m_count:
+                if _raw_m_count:
                     from src.services.tools.metric_view_utils.mquery_llm_fallback import (
                         recover_sources_with_llm,
                     )
 
                     logger.info(
-                        f"[UCMV] {raw_m_count} raw M-Query table(s) detected; attempting M→SQL LLM recovery"
+                        f"[UCMV] {_raw_m_count} raw M-Query table(s) detected; attempting M→SQL LLM recovery"
                     )
-                    mquery_entries, _recovered = _run_async(
+                    mquery_entries, _raw_m_recovered = _run_async(
                         recover_sources_with_llm(
                             mquery_entries,
                             model=(_get("llm_model") or "databricks-claude-sonnet-4-5"),
                         )
                     )
                     logger.info(
-                        f"[UCMV] M→SQL recovery: {_recovered}/{raw_m_count} table(s) recovered"
+                        f"[UCMV] M→SQL recovery: {_raw_m_recovered}/{_raw_m_count} table(s) recovered"
                     )
             except Exception as _m_err:
                 logger.warning(
@@ -923,6 +997,61 @@ class UCMetricViewGeneratorTool(BaseTool):
         yaml_output = pipeline.emit_all_yaml(catalog=catalog, schema=schema)
         sql_output = pipeline.emit_all_sql(catalog=catalog, schema=schema)
         results = pipeline.get_results()
+
+        # Full raw Power Query M per view (same table_key space as sql_output) so
+        # the UI can show the FULL M statement alongside the derived Source SQL,
+        # plus an audit of transformation steps the M carries that may NOT be
+        # reflected in that SQL (filters, group-by, joins, …) — so the loss is
+        # visible, not silent. Prefer the pre-recovery original M; fall back to
+        # the parsed source expression.
+        source_mquery: dict = {}
+        source_transform_todos: dict = {}
+        try:
+            from src.services.tools.metric_view_utils.mquery_transform_audit import (
+                audit_mquery_transformations,
+            )
+
+            for _tk, _ti in (pipeline.mquery_tables or {}).items():
+                _raw = (
+                    _raw_source_by_name.get(getattr(_ti, "table_name", ""))
+                    or getattr(_ti, "raw_transpiled_sql", "")
+                    or getattr(_ti, "full_sql", "")
+                )
+                if _raw:
+                    source_mquery[_tk] = _raw
+                    _todos = audit_mquery_transformations(_raw)
+                    if _todos:
+                        source_transform_todos[_tk] = _todos
+        except Exception as _sm_err:  # noqa: BLE001 — display aid, never fatal
+            logger.warning(f"[UCMV] source_mquery/audit build failed: {_sm_err}")
+
+        # Safety net: when LLM translation is ON but nothing came through, say WHY
+        # loudly instead of returning a silent empty result. A total 0-view yield —
+        # or raw-M tables that recovered NONE of their sources — is the exact shape
+        # of the subprocess LLM failure (provider routing / FMAPI rate-limit /
+        # timeout) that otherwise reads as "the tool just produced nothing".
+        llm_translation_warning = None
+        if use_llm:
+            _view_count = len(yaml_output or {})
+            if _raw_m_count and not _raw_m_recovered:
+                llm_translation_warning = (
+                    f"LLM source recovery produced nothing for all {_raw_m_count} raw "
+                    "Power Query table(s), so they yielded no views. This is almost "
+                    "always the DAX/M LLM calls failing — provider routing, an FMAPI "
+                    "rate-limit/throttle, or the subprocess timing out — NOT an empty "
+                    "model. Check the run log for 'LLM Provider NOT provided' or "
+                    "throttling and re-run; if it timed out, lower the DAX LLM batch "
+                    "size/concurrency or raise the subprocess limit."
+                )
+            elif _view_count == 0:
+                llm_translation_warning = (
+                    "0 metric views were generated with LLM translation enabled. If "
+                    "measures were present, the DAX→SQL LLM calls likely failed "
+                    "(provider routing / FMAPI throttle / timeout) rather than the "
+                    "model being empty — check the run log and re-run."
+                )
+            if llm_translation_warning:
+                logger.warning(f"[UCMV] {llm_translation_warning}")
 
         # Catch-all so no reference measure is silently dropped: gather every
         # measure that never landed on a fact view into a synthetic
@@ -1151,6 +1280,14 @@ class UCMetricViewGeneratorTool(BaseTool):
         output = {
             "yaml": yaml_output,
             "sql": sql_output,
+            # Full raw Power Query M per view (keyed like `sql`) + an audit of the
+            # transformation steps it carries that may not be reflected in that SQL.
+            "source_mquery": source_mquery,
+            "source_transform_todos": source_transform_todos,
+            # Loud, specific reason when LLM translation was on but produced nothing
+            # — so an LLM failure (provider/throttle/timeout) never reads as a silent
+            # 0-view result. None when translation produced views.
+            "llm_translation_warning": llm_translation_warning,
             "stats": results["stats"],
             "migration_report": results.get("migration_report", ""),
             "limitations": results.get("limitations", {}),

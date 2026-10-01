@@ -89,6 +89,12 @@ interface UCMVStats {
 export interface UCMVResult {
   yaml: Record<string, string>;
   sql: Record<string, string>;
+  /** Full raw Power Query M per view (keyed like `sql`) — what the source SQL was derived from. */
+  source_mquery?: Record<string, string>;
+  /** Per-view labels for M transformation steps that may NOT be reflected in the derived Source SQL. */
+  source_transform_todos?: Record<string, string[]>;
+  /** Loud reason when LLM translation was enabled but produced nothing (provider/throttle/timeout vs silent 0 views). */
+  llm_translation_warning?: string | null;
   stats: Record<string, UCMVStats> | UCMVStats;
   migration_report?: string;
   /** Raw source measures with their original DAX expressions (echoed from the generator). */
@@ -1122,6 +1128,15 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
         </Alert>
       )}
 
+      {/* LLM translation was on but produced nothing — surface WHY (provider /
+          throttle / timeout) instead of a silent empty result. */}
+      {result.llm_translation_warning && (
+        <Alert severity="error" sx={{ mb: 1.5 }}>
+          <strong>LLM translation produced no views.</strong>{' '}
+          {result.llm_translation_warning}
+        </Alert>
+      )}
+
       {/* Validation status: compact chip row + optional per-view result list. */}
       {result.pbi_validation && (
         <Box sx={{ mb: 1.5 }}>
@@ -1367,6 +1382,47 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
               defaultExpanded
             >
               <SQLBlock code={result.sql[selected]} />
+            </Section>
+          )}
+
+          {/* Source M (Power Query) — the FULL raw M the Source SQL was derived
+              from, plus a warning for transformation steps that may not have made
+              it into that SQL (filters, group-by, joins, …). */}
+          {result.source_mquery?.[selected] && (
+            <Section
+              title="Source M (Power Query)"
+              icon={<StorageIcon fontSize="small" color="action" />}
+              defaultExpanded={!result.sql[selected] || !!result.source_transform_todos?.[selected]?.length}
+            >
+              {result.source_transform_todos?.[selected]?.length ? (
+                <Alert severity="warning" variant="outlined" sx={{ mb: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                    These Power Query steps are in the source M but may NOT be reflected in the Source SQL above — review:
+                  </Typography>
+                  <Box component="ul" sx={{ pl: 2, m: 0 }}>
+                    {result.source_transform_todos[selected].map((t) => (
+                      <li key={t}><Typography variant="caption">{t}</Typography></li>
+                    ))}
+                  </Box>
+                </Alert>
+              ) : null}
+              <Box
+                component="pre"
+                sx={{
+                  m: 0,
+                  p: 1,
+                  fontFamily: 'monospace',
+                  fontSize: '0.75rem',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  bgcolor: 'action.hover',
+                  borderRadius: 1,
+                  maxHeight: 400,
+                  overflow: 'auto',
+                }}
+              >
+                {result.source_mquery[selected]}
+              </Box>
             </Section>
           )}
 

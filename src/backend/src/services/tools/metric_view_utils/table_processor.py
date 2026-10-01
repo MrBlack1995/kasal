@@ -725,6 +725,10 @@ def process_table(
                     feedback=(ctx.llm_config or {}).get(
                         "refinement_feedback_by_measure"
                     ),
+                    # Optional customer-supplied domain context (vocabulary,
+                    # business rules, fiscal-calendar quirks). Same for every
+                    # measure on the table, so it rides the per-batch prompt.
+                    domain_context=(ctx.llm_config or {}).get("domain_context", ""),
                 )
             )
             llm_translated = []
