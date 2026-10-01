@@ -31,6 +31,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile';
 import ClearIcon from '@mui/icons-material/Clear';
 import { usePowerBIOAuth } from '../../../../hooks/usePowerBIOAuth';
 import { PowerBIReconConnectionFields } from './PowerBIReconConnectionFields';
+import { UCMVLearningPanel } from './UCMVLearningPanel';
 
 // Authentication method type
 export type PowerBIAuthMethod = 'service_principal' | 'service_account' | 'user_oauth';
@@ -795,6 +796,15 @@ Key dimensions and their members:
               InputProps={{
                 sx: { fontFamily: 'monospace', fontSize: '0.75rem' }
               }}
+            />
+            <Divider sx={{ my: 1 }}>
+              <Typography variant="caption" color="text.secondary">
+                or learn it from deployed UCMVs
+              </Typography>
+            </Divider>
+            <UCMVLearningPanel
+              onApplyDomainContext={(readme) => handleFieldChange('domain_context', readme)}
+              disabled={disabled}
             />
           </Box>
         </AccordionDetails>
