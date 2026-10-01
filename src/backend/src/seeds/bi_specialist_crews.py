@@ -327,6 +327,10 @@ UCMV_GEN_TASK = {
             "schema_name": "",
             "use_llm_fallback": True,
             "llm_model": "databricks-claude-sonnet-4-5",
+            # Visual-usage triage: set True to skip measures not shown/filtered in
+            # any visual (directly or via a dependency chain). Needs the report's
+            # visual-usage data; no-op without it. Base measures always kept.
+            "prune_non_visual_measures": False,
             # JSON mode: the flow injects the preceding Pipeline Config crew's
             # output into these fields (config_json ← proposed_config,
             # measures_json/mquery_json ← the handoff arrays it now emits). They
@@ -436,13 +440,18 @@ UCMV_GEN_RECON_TASK = {
             "schema_name": "",
             "use_llm_fallback": True,
             "llm_model": "databricks-claude-sonnet-4-5",
-            # Iterative reconciliation — the operator fills warehouse_id and
-            # reference_years; without them the tool degrades to single-pass.
+            # Iterative reconciliation — the operator fills warehouse_id; without
+            # it the tool degrades to single-pass. reference_years is OPTIONAL
+            # (empty = compare all years).
             "enable_reconciliation": True,
             "max_reconciliation_cycles": 5,
             "reconciliation_target_pct": 100,
             "warehouse_id": "",
-            "reference_years": "",  # e.g. "[2025, 2026]"
+            "reference_years": "",  # optional, e.g. "[2025, 2026]" (empty = all years)
+            # Visual-usage triage: set True to skip measures not shown/filtered in
+            # any visual (directly or via a dependency chain) — needs the report's
+            # visual-usage data; no-op without it. Base measures always kept.
+            "prune_non_visual_measures": False,
             # JSON-mode handoff fields (filled by the preceding Pipeline Config crew).
             "config_json": "{}",
             "measures_json": "[]",
