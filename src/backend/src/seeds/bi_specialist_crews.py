@@ -1264,7 +1264,24 @@ async def _seed_task(session, data: dict) -> None:
 async def _seed_crew(session, data: dict) -> None:
     crew_id = uuid.uuid5(uuid.NAMESPACE_DNS, data["id"])
     result = await session.execute(select(Crew).where(Crew.id == crew_id))
-    if result.scalars().first():
+    existing = result.scalars().first()
+    seed_nodes = data.get("nodes", [])
+    seed_edges = data.get("edges", [])
+    if existing:
+        # Self-heal. This seeder is otherwise create-only, so a crew that first
+        # landed with EMPTY canvas nodes (an older build before the nodes were
+        # added here, or a save path that dropped them) would open blank on the
+        # Agent Builder canvas forever — re-seeding never backfilled it. Fill the
+        # nodes ONLY when the stored crew has none, so a crew the user has since
+        # edited (and which therefore has nodes) is never clobbered.
+        if not existing.nodes and seed_nodes:
+            existing.nodes = seed_nodes
+            existing.edges = seed_edges
+            if not existing.agent_ids:
+                existing.agent_ids = data.get("agent_ids", [])
+            if not existing.task_ids:
+                existing.task_ids = data.get("task_ids", [])
+            logger.info(f"Backfilled canvas nodes for existing crew: {data['name']}")
         return
     crew = Crew(
         id=crew_id,
@@ -1272,8 +1289,8 @@ async def _seed_crew(session, data: dict) -> None:
         group_id=BI_GROUP_ID,
         agent_ids=data.get("agent_ids", []),
         task_ids=data.get("task_ids", []),
-        nodes=data.get("nodes", []),
-        edges=data.get("edges", []),
+        nodes=seed_nodes,
+        edges=seed_edges,
         process=data.get("process", "sequential"),
         reasoning=data.get("reasoning", False),
         memory=data.get("memory", True),
