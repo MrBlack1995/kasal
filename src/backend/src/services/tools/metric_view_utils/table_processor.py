@@ -729,6 +729,12 @@ def process_table(
                     # business rules, fiscal-calendar quirks). Same for every
                     # measure on the table, so it rides the per-batch prompt.
                     domain_context=(ctx.llm_config or {}).get("domain_context", ""),
+                    # Time-intelligence is only translated when reconciliation is
+                    # active to validate it; otherwise the model declines it (no
+                    # unvalidated prior-year/YTD math).
+                    time_intel_enabled=bool(
+                        (ctx.llm_config or {}).get("reconciliation_active")
+                    ),
                 )
             )
             llm_translated = []

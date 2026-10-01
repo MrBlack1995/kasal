@@ -119,19 +119,20 @@ CRITICAL SQL rules for every "sql_expr" (see skill corpus §0 for detail):
    (score, id) PAIRS — emit
    `COUNT(DISTINCT CASE WHEN <cond> THEN concat(CAST(source.score AS STRING),'|',CAST(source.id AS STRING)) END)`,
    never a row-level SUM or a product of counts.
-5. TIME-INTELLIGENCE IS TRANSLATABLE — do NOT decline it as architecture_change
-   when a period/date/fiscal column is present in the fact-table context. Prior
-   year/period, YTD, QTD, MTD and the DAX functions SAMEPERIODLASTYEAR, DATEADD,
-   PARALLELPERIOD, PREVIOUSYEAR, TOTALYTD/DATESYTD map to a WINDOW FUNCTION over the
-   period column — this is single-source and needs NO subquery and NO new table:
+5. TIME-INTELLIGENCE — prior year/period, YTD, QTD, MTD and the DAX functions
+   SAMEPERIODLASTYEAR, DATEADD, PARALLELPERIOD, PREVIOUSYEAR, TOTALYTD/DATESYTD —
+   is expressible as a WINDOW FUNCTION over the period column (single-source, no
+   subquery, no new table):
      - prior period:  LAG(SUM(source.<x>)) OVER (ORDER BY source.<period>)
      - prior year:    LAG(SUM(source.<x>), <periods_per_year>) OVER (ORDER BY source.<period>)
      - YTD:           SUM(SUM(source.<x>)) OVER (PARTITION BY source.<year> ORDER BY source.<period>)
-   Use the period/fiscal column shown in the context (e.g. fiscper, fiscal_year).
-   A declared calendar join aliased on a prior-period key (e.g. date_py) is also
-   permitted — declared join aliases are always legal. See the skill corpus
-   WINDOW.md and UNSUPPORTED.md. Only decline (architecture_change) when NO
-   period/date column is available at all."""
+   Use the period/fiscal column shown in the context (e.g. fiscper, fiscal_year); a
+   declared calendar self-join on a prior-period key (e.g. date_py) is also legal.
+   See the skill corpus WINDOW.md / UNSUPPORTED.md. WHETHER to translate it this
+   run is set by the "Time-intelligence" directive in the user message — a window
+   over the wrong period count is silently wrong, so it is only enabled when PBI
+   reconciliation is validating; when that directive says NOT validated, decline
+   it (success=false, architecture_change)."""
 
 # The JSON output contract (shared by corpus + fallback prompts). Adds the
 # 7-category `dax_class` provenance label alongside the existing fields.
@@ -231,6 +232,31 @@ def _domain_context_block(domain_context: str) -> str:
     )
 
 
+def _time_intel_directive(enabled: bool) -> str:
+    """Per-run time-intelligence gate.
+
+    Time-intelligence (prior year/period, YTD/QTD) is expressible as a window
+    function, but a window over the wrong period count is silently wrong — so we
+    only let the model translate it when the reconciliation loop is ACTIVE to
+    validate the numbers cell-by-cell. Off → decline it (an honest TODO beats an
+    unvalidated prior-year figure).
+    """
+    if enabled:
+        return (
+            "\n## Time-intelligence: ENABLED this run (PBI reconciliation will "
+            "validate the numbers)\nTranslate prior-year/period, YTD, QTD, MTD and "
+            "SAMEPERIODLASTYEAR / DATEADD / PARALLELPERIOD / TOTALYTD via a WINDOW "
+            "function over the period/fiscal column shown in the context (rule 5) — "
+            "do NOT decline them.\n"
+        )
+    return (
+        "\n## Time-intelligence: NOT validated this run\nIf a measure needs "
+        "prior-year/period, YTD/QTD or period-shift semantics (SAMEPERIODLASTYEAR, "
+        "DATEADD, PARALLELPERIOD, TOTALYTD, …), DECLINE it: success=false, "
+        'dax_class="architecture_change". Do NOT emit unvalidated period math.\n'
+    )
+
+
 def _build_user_prompt(
     measure_name: str,
     dax_expression: str,
@@ -238,6 +264,7 @@ def _build_user_prompt(
     original_to_snake: dict[str, str],
     table_context: str = "",
     domain_context: str = "",
+    time_intel_enabled: bool = False,
 ) -> str:
     """Build the user prompt with context.
 
@@ -255,9 +282,10 @@ def _build_user_prompt(
     )  # cap at 50 for token efficiency
     ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
     dc_block = _domain_context_block(domain_context)
+    ti_block = _time_intel_directive(time_intel_enabled)
 
     return f"""Translate this DAX measure to Spark SQL for a UC Metric View.
-{ctx_block}{dc_block}
+{ctx_block}{dc_block}{ti_block}
 ## Measure
 Name: {measure_name}
 
@@ -305,6 +333,7 @@ def _build_batch_user_prompt(
     table_context: str = "",
     feedback: dict | None = None,
     domain_context: str = "",
+    time_intel_enabled: bool = False,
 ) -> str:
     """Build ONE user prompt covering all measures in a batch.
 
@@ -317,6 +346,7 @@ def _build_batch_user_prompt(
     available_measures = ", ".join(sorted(base_names)[:50])
     ctx_block = f"\n## Fact table context\n{table_context}\n" if table_context else ""
     dc_block = _domain_context_block(domain_context)
+    ti_block = _time_intel_directive(time_intel_enabled)
     lines = []
     for i, m in enumerate(measures, start=1):
         entry = f"{i}. name: {m.original_name}\n   DAX: {m.dax_expression}"
@@ -336,7 +366,7 @@ def _build_batch_user_prompt(
     # Goes in the VARIABLE user message so the corpus prefix stays cacheable.
     func_refs = render_function_refs(m.dax_expression for m in measures)
     return f"""Translate the following {len(measures)} DAX measures to Spark SQL for a UC Metric View, using the shared fact-table context below.
-{ctx_block}{dc_block}
+{ctx_block}{dc_block}{ti_block}
 ## Available MEASURE() references (already translated)
 {available_measures}
 {func_refs}
@@ -539,6 +569,7 @@ async def translate_with_llm(
     cache: OrderedDict | None = None,
     table_context: str = "",
     domain_context: str = "",
+    time_intel_enabled: bool = False,
 ) -> TranslationResult:
     """Attempt LLM translation of a single untranslatable measure.
 
@@ -578,6 +609,7 @@ async def translate_with_llm(
         original_to_snake,
         table_context=table_context,
         domain_context=domain_context,
+        time_intel_enabled=time_intel_enabled,
     )
 
     # Inject a deep, UCMV-legal reference for the long-tail DAX functions THIS
@@ -673,6 +705,7 @@ async def translate_batch_with_llm(
     table_context: str = "",
     feedback: dict | None = None,
     domain_context: str = "",
+    time_intel_enabled: bool = False,
 ) -> list[TranslationResult]:
     """Attempt LLM translation of a batch of untranslatable measures.
 
@@ -767,7 +800,12 @@ async def translate_batch_with_llm(
 
         if need_llm:
             prompt = _build_batch_user_prompt(
-                need_llm, snap_names, table_context, feedback, domain_context
+                need_llm,
+                snap_names,
+                table_context,
+                feedback,
+                domain_context,
+                time_intel_enabled,
             )
             # Budget output for the whole batch (each measure ~a few hundred tokens).
             batch_max_tokens = min(len(need_llm) * 400 + 800, 16000)
@@ -794,6 +832,7 @@ async def translate_batch_with_llm(
                             cache=run_cache,
                             table_context=table_context,
                             domain_context=domain_context,
+                            time_intel_enabled=time_intel_enabled,
                         )
                         for m in need_llm
                     )

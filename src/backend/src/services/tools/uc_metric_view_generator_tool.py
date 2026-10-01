@@ -698,6 +698,12 @@ class UCMetricViewGeneratorTool(BaseTool):
             _dc = _get("domain_context")
             if isinstance(_dc, str) and _dc.strip():
                 llm_config["domain_context"] = _dc.strip()
+            # Time-intelligence is translated ONLY inside the reconciliation loop
+            # (which validates the numbers); otherwise the DAX-LLM declines it so no
+            # unvalidated prior-year/YTD math ships. This generation is the in-loop
+            # one when _in_recon_loop is set.
+            if kwargs.get("_in_recon_loop"):
+                llm_config["reconciliation_active"] = True
 
         def _parse_json_input(raw, default):
             """Parse a JSON input; treat empty/blank as the default (never error)."""

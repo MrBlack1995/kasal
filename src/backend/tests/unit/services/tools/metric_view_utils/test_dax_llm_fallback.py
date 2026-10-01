@@ -659,20 +659,54 @@ class TestDomainContextInjection:
 
 
 class TestTimeIntelligenceRule:
-    """The DAX-LLM is told time-intelligence is translatable via window functions,
-    not auto-declined as architecture_change."""
+    """Time-intelligence is translatable via window functions, but WHETHER to do
+    it this run is gated on reconciliation (the validator) via a per-run directive."""
 
-    def test_sql_rules_cover_time_intelligence(self):
+    def test_sql_rules_describe_the_window_form(self):
         from src.services.tools.metric_view_utils.dax_llm_fallback import _SQL_RULES
 
         assert "TIME-INTELLIGENCE" in _SQL_RULES
         assert "SAMEPERIODLASTYEAR" in _SQL_RULES
         assert "LAG(" in _SQL_RULES
-        assert "do NOT decline" in _SQL_RULES
+        # the rule now defers the WHETHER to the per-run directive
+        assert "directive" in _SQL_RULES
 
-    def test_time_intelligence_rule_reaches_the_system_prompt(self):
+    def test_rule_reaches_the_system_prompt(self):
         from src.services.tools.metric_view_utils import dax_llm_fallback as m
 
-        # _SQL_RULES is appended to the output contract, which is part of the
-        # system prompt (corpus-backed or terse) — so the guidance is actually sent.
         assert "TIME-INTELLIGENCE" in m._OUTPUT_CONTRACT
+
+    def test_directive_enabled_tells_model_to_translate(self):
+        from src.services.tools.metric_view_utils.dax_llm_fallback import (
+            _time_intel_directive,
+        )
+
+        d = _time_intel_directive(True)
+        assert "ENABLED" in d
+        assert "do NOT decline" in d
+        assert "SAMEPERIODLASTYEAR" in d
+
+    def test_directive_disabled_tells_model_to_decline(self):
+        from src.services.tools.metric_view_utils.dax_llm_fallback import (
+            _time_intel_directive,
+        )
+
+        d = _time_intel_directive(False)
+        assert "NOT validated" in d
+        assert "DECLINE" in d
+        assert "architecture_change" in d
+
+    def test_batch_prompt_gates_on_the_flag(self):
+        m = _tr(
+            "PY Sales",
+            "CALCULATE([Sales], SAMEPERIODLASTYEAR('Cal'[Date]))",
+            "py_sales",
+        )
+        on = _build_batch_user_prompt(
+            [m], {"sales"}, table_context="t", time_intel_enabled=True
+        )
+        off = _build_batch_user_prompt(
+            [m], {"sales"}, table_context="t", time_intel_enabled=False
+        )
+        assert "ENABLED this run" in on and "do NOT decline" in on
+        assert "NOT validated this run" in off and "DECLINE" in off
