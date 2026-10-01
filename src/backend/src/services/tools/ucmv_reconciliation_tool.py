@@ -344,9 +344,9 @@ class UCMVReconciliationTool(BaseTool):
         self, view_name: str, mapping: recon.UCMVMapping, kwargs: dict, dry_run: bool
     ) -> dict:
         dimension_name = mapping.binding.default_dimension
-        reference_years = self._cfg(kwargs, "reference_years")
-        if not reference_years:
-            return {"error": "reference_years is required"}
+        # reference_years is OPTIONAL: empty means "all years" (no year filter).
+        # The query builder and comparator both treat an empty list that way.
+        reference_years = self._cfg(kwargs, "reference_years") or []
         dimension_values = self._cfg(kwargs, "dimension_values")
         periods = self._cfg(kwargs, "periods")
         model_id = (

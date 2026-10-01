@@ -100,12 +100,23 @@ class UCMetricViewGeneratorSchema(BaseModel):
     reference_years: Optional[str] = Field(
         None,
         description="Fiscal years to reconcile, as a JSON array or comma list "
-        '(e.g. "[2025, 2026]" or "2025,2026"). Required for reconciliation.',
+        '(e.g. "[2025, 2026]" or "2025,2026"). OPTIONAL — if omitted, '
+        "reconciliation compares across all years.",
     )
     warehouse_id: Optional[str] = Field(
         None,
         description="Databricks SQL warehouse ID — required for reconciliation "
         "(deploys + queries the metric view).",
+    )
+    prune_non_visual_measures: Optional[bool] = Field(
+        False,
+        description=(
+            "Triage: when true AND a visual-usage index is available, skip "
+            "measures that are not shown or filtered in any report visual, "
+            "directly or through a dependency chain (legacy/unused measures). "
+            "Base/implicit column measures are always kept. No-op without visual "
+            "usage data (nothing would be considered used)."
+        ),
     )
     catalog: Optional[str] = Field(None, description="Target UC catalog name")
     schema_name: Optional[str] = Field(None, description="Target UC schema name")
@@ -227,6 +238,7 @@ class UCMetricViewGeneratorTool(BaseTool):
             "reconciliation_target_pct",
             "reference_years",
             "warehouse_id",
+            "prune_non_visual_measures",
             "catalog",
             "schema_name",
             "inner_dim_joins",
@@ -271,23 +283,58 @@ class UCMetricViewGeneratorTool(BaseTool):
         def _get(key):
             return kwargs.get(key) or self._default_config.get(key)
 
-        # Iterative reconciliation: when enabled (and not already inside the loop),
-        # delegate to the generate→deploy→reconcile→refine orchestrator. It calls
-        # this same tool with reconciliation off (guarded by _in_recon_loop), so
-        # there is no recursion. Falls through to single-pass if prerequisites
-        # (warehouse_id / reference_years / creds) are missing.
-        if _get("enable_reconciliation") and not kwargs.get("_in_recon_loop"):
-            try:
-                from src.services.tools.ucmv_iterative_recon import run_from_generator
-
-                _loop_out = run_from_generator(self, kwargs)
-                if _loop_out is not None:
-                    return json.dumps(_loop_out)
-            except Exception as e:  # noqa: BLE001 — never let the loop break generation
-                logger.warning(
-                    f"[UCMV] iterative reconciliation failed ({e}); "
-                    "falling back to single-pass generation."
+        # Iterative reconciliation: when requested (and not already inside the
+        # loop), delegate to the generate→deploy→reconcile→refine orchestrator. It
+        # calls this same tool with reconciliation off (guarded by _in_recon_loop),
+        # so there is no recursion. Falls through to single-pass if prerequisites
+        # (warehouse_id / Power BI creds) are missing.
+        #
+        # Enablement is DERIVED, not just the explicit flag: not every UI surface
+        # renders the enable_reconciliation checkbox (the generic tool-config form
+        # shows only text fields), so a warehouse_id — meaningful for nothing but
+        # reconciliation in this tool — is itself the request to reconcile. Without
+        # this, an operator fills the field and reconciliation silently never runs.
+        # reference_years is OPTIONAL (empty = compare all years), so it is NOT a
+        # prerequisite; only the warehouse is. run_from_generator still validates
+        # and degrades to single-pass if the warehouse/creds cannot be resolved.
+        # Surfaced in the output (and persisted to history) whenever reconciliation
+        # was WANTED but did not run, so a single-pass is never silent — the UI and
+        # the saved result name the exact reason. None when recon ran or was never
+        # requested.
+        _recon_skipped = None
+        _recon_requested = _get("enable_reconciliation") or _get("warehouse_id")
+        if _recon_requested and not kwargs.get("_in_recon_loop"):
+            _missing = [n for n in ("warehouse_id",) if not _get(n)]
+            if _missing:
+                _recon_skipped = (
+                    "Reconciliation was requested but did NOT run — missing required "
+                    f"input(s): {', '.join(_missing)}. Provide a Databricks SQL "
+                    "warehouse ID (and Power BI credentials) to enable the live "
+                    "cell-by-cell check; generation ran single-pass."
                 )
+                logger.warning(f"[UCMV] {_recon_skipped}")
+            else:
+                try:
+                    from src.services.tools.ucmv_iterative_recon import (
+                        run_from_generator,
+                    )
+
+                    _loop_out = run_from_generator(self, kwargs)
+                    if _loop_out is not None:
+                        return json.dumps(_loop_out)
+                    _recon_skipped = (
+                        "Reconciliation was requested but did NOT run — the warehouse "
+                        "or Power BI credentials could not be resolved; generation ran "
+                        "single-pass."
+                    )
+                    logger.warning(f"[UCMV] {_recon_skipped}")
+                except (
+                    Exception
+                ) as e:  # noqa: BLE001 — never let the loop break generation
+                    _recon_skipped = f"Reconciliation was requested but FAILED: {e}"
+                    logger.warning(
+                        f"[UCMV] {_recon_skipped} — falling back to single-pass."
+                    )
 
         # JSON inputs (measures/mquery/config/relationships/scan) are injected into
         # _default_config by the flow handoff. A capable agent, told to "call the
@@ -803,6 +850,30 @@ class UCMetricViewGeneratorTool(BaseTool):
         except Exception as e:
             logger.warning(f"Failed to derive indirect visual usage: {e}")
 
+        # TRIAGE (opt-in): drop measures with no direct AND no indirect visual
+        # usage, so a report's legacy/unused measures are not translated-noise in
+        # the output. Gated on BOTH the flag AND real visual data (direct
+        # annotation count > 0) — without a visual-usage index every measure looks
+        # unused and we must NOT prune (we'd drop the whole model). Base/implicit
+        # column measures are always kept (see prune_non_visual_measures).
+        measures_pruned_non_visual = 0
+        if _get("prune_non_visual_measures") and visual_usage_annotated > 0:
+            try:
+                from src.services.tools.metric_view_utils.visual_usage_annotator import (
+                    prune_non_visual_measures,
+                )
+
+                measures_pruned_non_visual = prune_non_visual_measures(
+                    pipeline.all_specs
+                )
+                logger.info(
+                    f"[UCMVGenerator] Visual-usage triage pruned "
+                    f"{measures_pruned_non_visual} measure(s) not reachable from any "
+                    "visual (directly or via dependency chain)."
+                )
+            except Exception as e:
+                logger.warning(f"Visual-usage pruning skipped: {e}")
+
         # Reconciliation framework input (priority 3): a deterministic
         # PBI-measure <-> UCMV-measure mapping draft per fact table. Reads
         # each measure's used_in_visuals, so it runs after the annotation
@@ -1110,6 +1181,11 @@ class UCMetricViewGeneratorTool(BaseTool):
             # How many measures gained INDIRECT usage (a visual-placed measure
             # references them transitively) — backtraced sub-KPIs.
             "indirect_visual_usage_count": indirect_visual_annotated,
+            # How many measures were pruned by visual-usage triage (opt-in via
+            # prune_non_visual_measures) — not shown/filtered in any visual,
+            # directly or via a dependency chain. 0 when triage is off or there
+            # was no visual-usage data to triage on.
+            "measures_pruned_non_visual": measures_pruned_non_visual,
             # {view_name: mapping_candidates_yaml_text} — the reconciliation
             # framework's (dqa/kpi_reconciliation) input, deterministically
             # derived instead of hand-authored. A DRAFT: binding: fields are
@@ -1117,6 +1193,11 @@ class UCMetricViewGeneratorTool(BaseTool):
             # and every measure's pbi_kind should be spot-checked before
             # trusting it for reconciliation.
             "pbi_ucmv_mapping": pbi_ucmv_mapping,
+            # Non-null ONLY when reconciliation was requested but did not run
+            # (missing reference_years/warehouse, unresolved creds, or an error).
+            # Names the reason so a single-pass is never silent — the UI renders
+            # it as a warning.
+            "reconciliation_skipped": _recon_skipped,
             # {view_name: {server, database, table}} — views backed by a live
             # connection to a semantic model; the UI flags these as a note
             # telling the team which model/table to parse to complete them.
@@ -1175,6 +1256,7 @@ class UCMetricViewGeneratorTool(BaseTool):
                     pbi_only_ingestion_tasks=output.get("pbi_only_ingestion_tasks")
                     or [],
                     pbi_validation=output.get("pbi_validation") or {},
+                    reconciliation_skipped=output.get("reconciliation_skipped"),
                 )
             )
         except Exception as _hist_err:
@@ -1587,6 +1669,7 @@ class UCMetricViewGeneratorTool(BaseTool):
         source_layer_ddl: Optional[dict] = None,
         pbi_only_ingestion_tasks: Optional[list] = None,
         pbi_validation: Optional[dict] = None,
+        reconciliation_skipped: Optional[str] = None,
     ) -> None:
         """Persist the full raw DAX extract to conversion_history (fail-open).
 
@@ -1681,6 +1764,10 @@ class UCMetricViewGeneratorTool(BaseTool):
                     "pbi_only_ingestion_tasks": pbi_only_ingestion_tasks or [],
                     # Validation-loop status (rec#4): skipped/ran/error + detail.
                     "pbi_validation": pbi_validation or {},
+                    # Reason reconciliation did not run when it was requested
+                    # (persisted so it is retrievable by execution_id, not just
+                    # in the live result).
+                    "reconciliation_skipped": reconciliation_skipped,
                 },
                 output_summary=(
                     f"Generated {view_count} UC metric view(s)"

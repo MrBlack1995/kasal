@@ -151,14 +151,16 @@ def run_from_generator(generator_tool, kwargs: dict) -> Optional[dict]:
             reference_years = [
                 y.strip() for y in reference_years.split(",") if y.strip()
             ]
-    # Reconciliation deploys + queries a live view; without a warehouse and the
-    # years to compare there is nothing to reconcile — degrade to single-pass.
-    if not warehouse_id or not reference_years:
+    # Reconciliation deploys + queries a live view, so a warehouse is required.
+    # reference_years is OPTIONAL — without it the comparison spans all years
+    # (empty list = no year filter) rather than being skipped.
+    if not warehouse_id:
         logger.info(
-            "[UCMV] enable_reconciliation set but warehouse_id/reference_years "
-            "missing — running single-pass generation."
+            "[UCMV] reconciliation requested but warehouse_id missing — "
+            "running single-pass generation."
         )
         return None
+    reference_years = reference_years or []
 
     from src.services.tools.metric_view_deployer_tool import MetricViewDeployerTool
     from src.services.tools.ucmv_reconciliation_tool import UCMVReconciliationTool

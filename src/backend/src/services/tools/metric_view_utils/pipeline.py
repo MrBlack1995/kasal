@@ -1066,13 +1066,52 @@ class MetricViewPipeline:
             if "source" in j:
                 j["source"] = _sub(j["source"])
 
+    def _infer_source_catalog(self) -> "str | None":
+        """The model's dominant SOURCE catalog, inferred from specs whose source
+        is already a 3-level ``catalog.schema.table``.
+
+        Used to qualify a source resolved from a ``Value.NativeQuery`` native-SQL
+        ``FROM`` clause, which uses an implicit-catalog ``schema.table`` (e.g.
+        ``udm_datamart_mtc.fm016_...``) and would otherwise emit a 2-part source
+        that cannot be deployed. Placeholder ``main.default.*`` / ``TODO.*``
+        sources are not real source catalogs and are ignored. Returns ``None``
+        when there is no evidence — we never guess a catalog out of thin air."""
+        from collections import Counter
+
+        cats: Counter = Counter()
+        for s in self.all_specs.values():
+            st = getattr(s, "source_table", "") or ""
+            low = st.lower()
+            if st.count(".") == 2 and not (
+                low.startswith("todo") or low.startswith("main.default.")
+            ):
+                cats[st.split(".", 1)[0]] += 1
+        return cats.most_common(1)[0][0] if cats else None
+
+    @staticmethod
+    def _qualify_source_catalog(spec, default_src_catalog: "str | None") -> None:
+        """Prepend the inferred source catalog to a 2-part (``schema.table``)
+        source so it becomes a 3-level ``catalog.schema.table``. Idempotent;
+        a no-op without an inferred catalog, or on sources that are already
+        3-level, bare, placeholders, or unresolved ``{token}`` templates."""
+        if not default_src_catalog:
+            return
+        st = getattr(spec, "source_table", None)
+        if not isinstance(st, str) or not st:
+            return
+        low = st.lower()
+        if st.count(".") == 1 and not (low.startswith("todo") or st.startswith("{")):
+            spec.source_table = f"{default_src_catalog}.{st}"
+
     def emit_all_yaml(
         self, catalog: str = "main", schema: str = "default"
     ) -> dict[str, str]:
         """Emit YAML for all specs. Returns dict[table_key -> yaml_string]."""
         result = {}
+        default_src_catalog = self._infer_source_catalog()
         for table_key, spec in self.all_specs.items():
             self._resolve_placeholders_in_spec(spec, catalog, schema)
+            self._qualify_source_catalog(spec, default_src_catalog)
             dim_meta = self._dimension_metadata.get(table_key, {})
             meas_meta = self._measure_metadata.get(table_key, {})
             dim_order = self.metadata_gen.get_dimension_order(table_key)
@@ -1096,7 +1135,9 @@ class MetricViewPipeline:
     ) -> dict[str, str]:
         """Emit deploy SQL for all specs. Returns dict[table_key -> sql_string]."""
         result = {}
+        default_src_catalog = self._infer_source_catalog()
         for table_key, spec in self.all_specs.items():
             self._resolve_placeholders_in_spec(spec, catalog, schema)
+            self._qualify_source_catalog(spec, default_src_catalog)
             result[table_key] = emit_deploy_sql(spec, catalog=catalog, schema=schema)
         return result

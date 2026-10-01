@@ -136,6 +136,10 @@ export interface UCMVResult {
     candidate_views?: string[];
     views?: Record<string, string>;
   };
+  /** Set only when reconciliation was requested but did not run (missing
+   *  reference_years/warehouse, unresolved creds, or an error). Names the reason
+   *  so a single-pass is never silent. */
+  reconciliation_skipped?: string | null;
 }
 
 export interface FallbackExtractRow {
@@ -1107,6 +1111,15 @@ const UCMVResultViewer: React.FC<UCMVResultViewerProps> = ({ result, editable = 
             ))}
           </Box>
         </Section>
+      )}
+
+      {/* Reconciliation was requested but did not run — surface the reason loudly
+          so a single-pass is never silent (e.g. reference_years not provided). */}
+      {result.reconciliation_skipped && (
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
+          <strong>Power BI reconciliation did not run.</strong>{' '}
+          {result.reconciliation_skipped}
+        </Alert>
       )}
 
       {/* Validation status: compact chip row + optional per-view result list. */}

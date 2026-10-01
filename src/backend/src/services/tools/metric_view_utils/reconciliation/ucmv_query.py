@@ -63,11 +63,21 @@ def build_ucmv_query(
             f"MEASURE({_quote_ident(m.ucmv_measure)}) AS {_quote_ident(m.ucmv_measure)}"
         )
 
-    years_sql = ", ".join(_quote_sql_string(y) for y in reference_years)
-    if td.grain == "snapshot":
-        where_clauses = [f"YEAR({_quote_ident(td.ucmv_column)}) IN ({years_sql})"]
-    else:
-        where_clauses = [f"{_quote_ident(td.year_filter_column)} IN ({years_sql})"]
+    # The year filter is OPTIONAL. With no reference_years the comparison spans
+    # all years (no year predicate) — reconciliation can run without the operator
+    # pinning specific fiscal years (closed-period filtering in compare() still
+    # applies).
+    where_clauses = []
+    if reference_years:
+        years_sql = ", ".join(_quote_sql_string(y) for y in reference_years)
+        if td.grain == "snapshot":
+            where_clauses.append(
+                f"YEAR({_quote_ident(td.ucmv_column)}) IN ({years_sql})"
+            )
+        else:
+            where_clauses.append(
+                f"{_quote_ident(td.year_filter_column)} IN ({years_sql})"
+            )
     if dimension_values:
         values_sql = ", ".join(_quote_sql_string(v) for v in dimension_values)
         where_clauses.append(f"{_quote_ident(dim.ucmv_column)} IN ({values_sql})")
@@ -83,11 +93,11 @@ def build_ucmv_query(
         "." + ".".join(parts[1:]) if len(parts) > 1 else ""
     )
 
+    where_line = f"\n    WHERE {where_sql}" if where_clauses else ""
     return f"""
     SELECT
         {select_sql}
-    FROM {from_target}
-    WHERE {where_sql}
+    FROM {from_target}{where_line}
     GROUP BY {group_sql}
     ORDER BY {dimension_name}, period
 """.strip()

@@ -46,6 +46,43 @@ def annotate_visual_usage(
     return annotated
 
 
+def prune_non_visual_measures(specs: dict[str, MetricViewSpec]) -> int:
+    """TRIAGE: drop measures with NO direct and NO indirect visual usage from
+    every spec. A report's legacy/unused measures — not drawn or filtered in any
+    visual, and not reached transitively by anything that is — are noise the user
+    never sees, so emitting (and documenting) them bloats the output.
+
+    Base measures (``category == "base"`` — the implicit column aggregates, which
+    are themselves derived FROM what visuals display) are ALWAYS kept.
+
+    MUST run AFTER ``annotate_visual_usage`` + ``annotate_indirect_visual_usage``,
+    and ONLY when a visual-usage index was actually supplied (the caller gates on
+    the direct-annotation count being > 0) — otherwise every measure looks unused
+    and the whole model would be dropped.
+
+    Safe by construction: ``annotate_indirect_visual_usage`` stamps the full
+    dependency closure of every visual-placed measure, so any measure a KEPT one
+    references has itself been marked (indirect) and survives — nothing that
+    remains can reference a pruned measure. Returns the number removed.
+    """
+    removed = 0
+    for spec in specs.values():
+        for attr in ("measures", "untranslatable"):
+            bucket = getattr(spec, attr, None)
+            if not bucket:
+                continue
+            kept = [
+                m
+                for m in bucket
+                if getattr(m, "category", None) == "base"
+                or getattr(m, "used_in_visuals", None)
+                or getattr(m, "indirect_visual_usage", None)
+            ]
+            removed += len(bucket) - len(kept)
+            setattr(spec, attr, kept)
+    return removed
+
+
 def annotate_indirect_visual_usage(specs: dict[str, MetricViewSpec]) -> int:
     """Propagate visual usage DOWN the measure-dependency graph (backtracing).
 

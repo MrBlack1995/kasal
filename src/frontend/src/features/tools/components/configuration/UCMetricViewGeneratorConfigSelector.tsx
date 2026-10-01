@@ -67,9 +67,11 @@ export interface UCMetricViewGeneratorConfig {
   llm_token?: string;
   // Reconciliation & quality
   warehouse_id?: string;
+  reference_years?: string;
   enable_reconciliation?: boolean;
   max_reconciliation_cycles?: number;
   reconciliation_target_pct?: number;
+  prune_non_visual_measures?: boolean;
   naming_config?: string;
   // Index signature for compatibility
   [key: string]: string | boolean | number | undefined;
@@ -764,6 +766,17 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
               helperText="Required for reconciliation (queries the deployed metric view)."
             />
 
+            <TextField
+              label="Reference years"
+              value={value.reference_years || ''}
+              onChange={(e) => handleFieldChange('reference_years', e.target.value)}
+              disabled={disabled}
+              fullWidth
+              size="small"
+              placeholder="[2025, 2026]"
+              helperText="Required for reconciliation — the fiscal year(s) to compare cell-by-cell, e.g. [2025, 2026]. Without it, reconciliation is skipped."
+            />
+
             <FormControlLabel
               control={
                 <Checkbox
@@ -778,8 +791,8 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
                   <Typography variant="body2">Reconcile against Power BI (iterative)</Typography>
                   <Typography variant="caption" color="text.secondary">
                     After each generation cycle, deploy the metric view and compare it cell-by-cell against
-                    the live Power BI model; feed mismatches back to the model to refine. Requires a
-                    Databricks warehouse and Power BI credentials above.
+                    the live Power BI model; feed mismatches back to the model to refine. Requires the
+                    Databricks warehouse, reference years, and Power BI credentials above.
                   </Typography>
                 </Box>
               }
@@ -816,6 +829,28 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
                 />
               </Box>
             )}
+
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={value.prune_non_visual_measures || false}
+                  onChange={(e) => handleFieldChange('prune_non_visual_measures', e.target.checked)}
+                  disabled={disabled}
+                  size="small"
+                />
+              }
+              label={
+                <Box>
+                  <Typography variant="body2">Only translate measures shown in a visual (triage)</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Skip measures not drawn or filtered in any report visual — directly or through a
+                    dependency chain — so legacy/unused measures don&apos;t clutter the output. Base
+                    column aggregates are always kept. No effect unless the report&apos;s visual-usage
+                    data is available.
+                  </Typography>
+                </Box>
+              }
+            />
 
             <TextField
               label="Naming / period config (JSON, optional)"

@@ -15,7 +15,10 @@ from typing import Optional
 def matches_reference_years(period: str, reference_years: list) -> bool:
     """True if ``period`` (fiscper "YYYYNNN" for month grain, or a bare year)
     falls within ``reference_years`` — matched on the leading 4 characters,
-    which is correct for both shapes."""
+    which is correct for both shapes. An empty ``reference_years`` means "no year
+    filter": every period matches (reconciliation across all years)."""
+    if not reference_years:
+        return True
     ref = {str(y) for y in reference_years}
     return str(period)[:4] in ref
 

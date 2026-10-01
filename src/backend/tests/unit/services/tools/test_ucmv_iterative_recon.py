@@ -132,14 +132,28 @@ class _StubGen:
         return json.dumps({"yaml": {}, "pbi_ucmv_mapping": {}})
 
 
-def test_run_from_generator_degrades_when_prereqs_missing():
+def test_run_from_generator_degrades_when_warehouse_missing():
     from src.services.tools.ucmv_iterative_recon import run_from_generator
 
-    # no warehouse_id / reference_years → None (caller does single-pass)
+    # no warehouse_id → None (caller does single-pass). reference_years is
+    # optional, so its absence alone must NOT degrade.
     assert run_from_generator(_StubGen(), {"enable_reconciliation": True}) is None
-    assert (
-        run_from_generator(_StubGen(), {"warehouse_id": "wh"}) is None
-    )  # years missing
+
+
+def test_run_from_generator_delegates_without_reference_years():
+    """warehouse_id present but no reference_years → still reconciles, with an
+    empty year list (compare all years)."""
+    from src.services.tools import ucmv_iterative_recon as mod
+
+    with (
+        patch.object(mod, "run_iterative_ucmv_generation", return_value={"ok": 1}) as m,
+        patch("src.services.tools.ucmv_reconciliation_tool.UCMVReconciliationTool"),
+        patch("src.services.tools.metric_view_deployer_tool.MetricViewDeployerTool"),
+    ):
+        out = mod.run_from_generator(_StubGen(), {"warehouse_id": "wh"})
+
+    assert out == {"ok": 1}
+    assert m.call_args.kwargs["recon_kwargs"]["reference_years"] == []
 
 
 def test_run_from_generator_maps_creds_and_delegates():
@@ -185,8 +199,8 @@ def test_run_from_generator_maps_creds_and_delegates():
 
 
 def test_generator_delegates_when_flag_set():
-    """The generator's _run short-circuits to the loop when enable_reconciliation
-    is set and the bridge returns a result."""
+    """The generator's _run short-circuits to the loop when reconciliation is
+    requested, the required inputs are present, and the bridge returns a result."""
     from src.services.tools.uc_metric_view_generator_tool import (
         UCMetricViewGeneratorTool,
     )
@@ -196,8 +210,51 @@ def test_generator_delegates_when_flag_set():
         "src.services.tools.ucmv_iterative_recon.run_from_generator",
         return_value={"stop_reason": "target_reached", "best_pct": 100},
     ):
-        out = json.loads(tool._run(enable_reconciliation=True))
+        out = json.loads(
+            tool._run(
+                enable_reconciliation=True,
+                warehouse_id="wh123",
+                reference_years="[2025, 2026]",
+            )
+        )
     assert out["stop_reason"] == "target_reached"
+
+
+def test_generator_surfaces_skip_reason_when_required_input_missing():
+    """Reconciliation requested (flag on) but the required warehouse_id is
+    missing → does NOT silently single-pass: the generator surfaces
+    reconciliation_skipped naming the missing field, and never calls the loop.
+    (reference_years is optional, so its absence does NOT trigger a skip.)"""
+    from src.services.tools.uc_metric_view_generator_tool import (
+        UCMetricViewGeneratorTool,
+    )
+
+    tool = UCMetricViewGeneratorTool()
+    with patch(
+        "src.services.tools.ucmv_iterative_recon.run_from_generator"
+    ) as mock_bridge:
+        out = json.loads(tool._run(enable_reconciliation=True))
+    mock_bridge.assert_not_called()  # no delegation when the warehouse is absent
+    assert "stop_reason" not in out
+    assert out.get("reconciliation_skipped")
+    assert "warehouse_id" in out["reconciliation_skipped"]
+
+
+def test_generator_delegates_on_warehouse_id_without_reference_years():
+    """reference_years is optional: a warehouse_id alone (reconcile ticked or
+    not) is enough to request reconciliation — the loop is invoked and years
+    default to all."""
+    from src.services.tools.uc_metric_view_generator_tool import (
+        UCMetricViewGeneratorTool,
+    )
+
+    tool = UCMetricViewGeneratorTool()
+    with patch(
+        "src.services.tools.ucmv_iterative_recon.run_from_generator",
+        return_value={"stop_reason": "max_cycles", "best_pct": 97},
+    ):
+        out = json.loads(tool._run(warehouse_id="wh123"))
+    assert out["stop_reason"] == "max_cycles"
 
 
 def test_generator_single_pass_when_bridge_returns_none():

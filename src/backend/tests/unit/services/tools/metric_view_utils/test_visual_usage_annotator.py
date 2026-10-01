@@ -13,6 +13,7 @@ from src.services.tools.metric_view_utils.data_classes import (
 )
 from src.services.tools.metric_view_utils.visual_usage_annotator import (
     annotate_indirect_visual_usage,
+    prune_non_visual_measures,
 )
 
 
@@ -71,7 +72,9 @@ class TestIndirectVisualUsage:
     def test_transitive_chain_attributes_to_the_visual_placed_root(self):
         # A (on a visual) -> B -> C. Both B and C are indirectly used, via A.
         a = _measure(
-            "A", "[B] + 1", used_in_visuals=[{"page": "P", "visual_type": "card", "role": "drawn"}]
+            "A",
+            "[B] + 1",
+            used_in_visuals=[{"page": "P", "visual_type": "card", "role": "drawn"}],
         )
         b = _measure("B", "[C] * 2")
         c = _measure("C", "SUM(z)")
@@ -84,7 +87,11 @@ class TestIndirectVisualUsage:
 
     def test_cycle_is_safe(self):
         # A <-> B mutual reference, A on a visual. Must terminate, not loop.
-        a = _measure("A", "[B]", used_in_visuals=[{"page": "P", "visual_type": "card", "role": "drawn"}])
+        a = _measure(
+            "A",
+            "[B]",
+            used_in_visuals=[{"page": "P", "visual_type": "card", "role": "drawn"}],
+        )
         b = _measure("B", "[A]")
         spec = _spec([a, b])
         annotate_indirect_visual_usage({"fact_otc": spec})
@@ -97,3 +104,56 @@ class TestIndirectVisualUsage:
         spec = _spec([a, b])
         assert annotate_indirect_visual_usage({"fact_otc": spec}) == 0
         assert b.indirect_visual_usage == []
+
+
+class TestPruneNonVisualMeasures:
+    """Triage: measures not reachable from any visual (direct or via a dependency
+    chain) are dropped; visual-placed, dependency-reachable, and base measures
+    stay."""
+
+    def _base(self, name):
+        return TranslationResult(
+            measure_name=name,
+            original_name=name,
+            sql_expr=f"SUM(source.{name})",
+            is_translatable=True,
+            skip_reason="",
+            dax_expression="",
+            confidence="high",
+            category="base",
+        )
+
+    def test_prunes_only_measures_with_no_direct_or_indirect_usage(self):
+        visible = _measure(
+            "KPI", "[Sub]", used_in_visuals=[{"page": "P", "role": "drawn"}]
+        )
+        sub = _measure("Sub", "SUM(x)")  # reached transitively by KPI
+        orphan = _measure("Legacy_PY", "SUM(y)")  # used nowhere
+        base = self._base("cases")  # implicit column measure — always kept
+        spec = _spec([visible, sub, orphan, base])
+        specs = {"fact_otc": spec}
+
+        annotate_indirect_visual_usage(specs)  # stamps `sub` via KPI
+        removed = prune_non_visual_measures(specs)
+
+        names = {m.original_name for m in spec.measures}
+        assert removed == 1
+        assert names == {"KPI", "Sub", "cases"}  # orphan pruned, base kept
+
+    def test_prunes_untranslatable_bucket_too(self):
+        spec = _spec([_measure("KPI", "SUM(x)", used_in_visuals=[{"page": "P"}])])
+        spec.untranslatable = [_measure("Dead_Legacy", "SOME(dax)")]
+        specs = {"f": spec}
+        annotate_indirect_visual_usage(specs)
+        removed = prune_non_visual_measures(specs)
+        assert removed == 1
+        assert spec.untranslatable == []
+
+    def test_noop_when_nothing_is_visually_used(self):
+        # (Caller gates on direct-annotation > 0; this just shows the function
+        # does not special-case an all-unused set beyond the base rule.)
+        a = _measure("A", "SUM(x)")
+        b = _measure("B", "SUM(y)")
+        spec = _spec([a, b])
+        removed = prune_non_visual_measures({"f": spec})
+        assert removed == 2  # both unused → both pruned (hence the caller's gate)
