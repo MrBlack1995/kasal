@@ -24,6 +24,7 @@ from src.services.powerbi.conversions import ConverterService
 from src.services.tools.metric_view_utils.correction_learning import (
     diff_all,
     distillation_messages,
+    resolve_original,
 )
 from src.utils.user_context import GroupContext
 
@@ -83,25 +84,43 @@ class UCMVCorrectionLearningService:
             return {"readme": None, "error": "No corrected UCMV YAML provided."}
 
         originals = await self._fetch_original_yaml(execution_id)
-        pairs: List[Dict[str, str]] = [
-            {"view": v, "original_yaml": originals.get(v, ""), "corrected_yaml": y}
-            for v, y in corrected.items()
-        ]
+        # Pair each uploaded YAML with OUR original: exact view name first, then
+        # name-similarity, then measure-set overlap — so a renamed-but-same-content
+        # deployed YAML still pairs with what we generated (and we learn from the
+        # correction) instead of being dropped as unmatched.
+        pairs: List[Dict[str, str]] = []
+        matched: List[str] = []
+        fuzzy: Dict[str, Dict[str, str]] = {}
+        unmatched: List[str] = []
+        for v, y in corrected.items():
+            okey, how = resolve_original(v, y, originals)
+            if okey is None:
+                # No original to compare against → there's no CORRECTION to learn
+                # (everything would read as "added"), so report it and skip rather
+                # than distil noise.
+                unmatched.append(v)
+                continue
+            if how == "exact":
+                matched.append(v)
+            else:
+                fuzzy[v] = {"matched_to": okey, "how": how}
+            pairs.append(
+                {"view": v, "original_yaml": originals[okey], "corrected_yaml": y}
+            )
         diffs = diff_all(pairs)
-        matched = sorted(v for v in corrected if v in originals)
-        unmatched = sorted(v for v in corrected if v not in originals)
 
         base = {
             "views_analyzed": len(pairs),
             "views_with_changes": len(diffs),
-            "matched_views": matched,
-            "unmatched_views": unmatched,
+            "matched_views": sorted(matched),
+            "fuzzy_matched": fuzzy,
+            "unmatched_views": sorted(unmatched),
         }
 
         if not diffs:
             note = "No material differences found between the uploaded UCMVs and our original output"
-            if not matched:
-                note += " (and no original matched by view name — check the view names or supply the execution_id)"
+            if not matched and not fuzzy:
+                note += " (and no original matched by name or measure overlap — check the names or supply the execution_id)"
             return {"readme": None, "note": note + ".", **base}
 
         messages = distillation_messages(diffs, model_hint)

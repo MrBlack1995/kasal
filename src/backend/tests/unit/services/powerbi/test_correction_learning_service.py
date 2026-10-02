@@ -68,7 +68,10 @@ async def test_learn_rejects_empty_input():
 
 
 @pytest.mark.asyncio
-async def test_unmatched_view_is_reported_and_still_diffs_as_added():
+async def test_differently_named_upload_fuzzy_matches_by_measure_overlap():
+    # Upload "fact_x" but our original is stored as "other_view"; they share the
+    # same measure set, so measure-overlap pairs them (vs the old exact-only match
+    # which would have dropped it as unmatched and learned nothing).
     svc = UCMVCorrectionLearningService(session=MagicMock(), group_context=MagicMock())
     with (
         patch(_CS) as cs,
@@ -79,6 +82,24 @@ async def test_unmatched_view_is_reported_and_still_diffs_as_added():
         )
         out = await svc.learn({"fact_x": _CORR})
 
+    assert out["matched_views"] == []  # not an exact-name match
+    assert out["unmatched_views"] == []  # but NOT dropped — fuzzy-paired
+    assert out["fuzzy_matched"]["fact_x"]["matched_to"] == "other_view"
+    assert out["fuzzy_matched"]["fact_x"]["how"] == "fuzzy_measures"
+    assert out["readme"] == "# x"  # the cost expr change was learned
+
+
+@pytest.mark.asyncio
+async def test_truly_unrelated_upload_is_reported_unmatched():
+    svc = UCMVCorrectionLearningService(session=MagicMock(), group_context=MagicMock())
+    with patch(_CS) as cs, patch(_COMPLETION, new=AsyncMock()) as comp:
+        cs.return_value.list_history = AsyncMock(
+            return_value=_history_resp(
+                {"zzz_unrelated": "measures:\n  - name: q\n    expr: SUM(source.z)\n"}
+            )
+        )
+        out = await svc.learn({"fact_x": _CORR})
+
     assert out["unmatched_views"] == ["fact_x"]
-    assert out["matched_views"] == []
-    assert out["readme"] == "# x"  # no original → all measures read as added → a change
+    assert out["fuzzy_matched"] == {}
+    comp.assert_not_awaited()

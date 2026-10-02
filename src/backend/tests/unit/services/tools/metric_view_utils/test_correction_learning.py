@@ -93,3 +93,61 @@ def test_distill_invokes_llm_and_returns_readme():
     assert out and out.startswith("# Learned context")
     assert "booked_cost" in captured["user"]
     assert "GENERALISABLE" in captured["system"]
+
+
+class TestResolveOriginalMatching:
+    """Pairing an uploaded YAML to our original: exact → name-sim → measure-overlap."""
+
+    _ORIG_YAML = "measures:\n  - name: sales\n    expr: SUM(source.a)\n  - name: cost\n    expr: SUM(source.b)\n"
+    _CORR_SAME_MEASURES = "measures:\n  - name: sales\n    expr: SUM(source.a)\n  - name: cost\n    expr: SUM(source.c)\n"
+
+    def test_exact_name(self):
+        from src.services.tools.metric_view_utils.correction_learning import (
+            resolve_original,
+        )
+
+        assert resolve_original("fact_x", "", {"fact_x": "m"}) == ("fact_x", "exact")
+
+    def test_fuzzy_name_strips_suffix_and_separators(self):
+        from src.services.tools.metric_view_utils.correction_learning import (
+            resolve_original,
+        )
+
+        # upload named "<view>_uc_metric_view" vs stored "FT_PE005"
+        k, how = resolve_original("FT_PE005_uc_metric_view", "", {"FT-PE005": "m"})
+        assert k == "FT-PE005" and how == "fuzzy_name"
+
+    def test_fuzzy_measure_overlap_when_names_differ(self):
+        from src.services.tools.metric_view_utils.correction_learning import (
+            resolve_original,
+        )
+
+        k, how = resolve_original(
+            "totally_renamed", self._CORR_SAME_MEASURES, {"orig_view": self._ORIG_YAML}
+        )
+        assert k == "orig_view" and how == "fuzzy_measures"
+
+    def test_no_match_when_name_and_measures_both_differ(self):
+        from src.services.tools.metric_view_utils.correction_learning import (
+            resolve_original,
+        )
+
+        k, how = resolve_original(
+            "zzz", "measures:\n  - name: q\n    expr: x\n", {"orig": self._ORIG_YAML}
+        )
+        assert k is None and how == "none"
+
+    def test_measure_names_helper(self):
+        from src.services.tools.metric_view_utils.correction_learning import (
+            measure_names,
+        )
+
+        assert measure_names(self._ORIG_YAML) == {"sales", "cost"}
+        assert measure_names("not yaml :::") == set()
+
+
+def test_prompt_has_dax_corrections_section():
+    from src.services.tools.metric_view_utils.correction_learning import _SYSTEM_PROMPT
+
+    assert "DAX translation corrections" in _SYSTEM_PROMPT
+    assert "self-healing" in _SYSTEM_PROMPT.lower()

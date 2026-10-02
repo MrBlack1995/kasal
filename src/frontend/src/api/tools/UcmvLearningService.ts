@@ -23,6 +23,8 @@ export interface UcmvLearnResponse {
   views_analyzed: number;
   views_with_changes: number;
   matched_views: string[];
+  /** Uploads paired to our original by name/measure similarity: view -> {matched_to, how}. */
+  fuzzy_matched?: Record<string, { matched_to: string; how: string }>;
   unmatched_views: string[];
   note?: string | null;
   error?: string | null;

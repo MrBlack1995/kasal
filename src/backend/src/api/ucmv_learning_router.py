@@ -50,6 +50,8 @@ class LearnResponse(BaseModel):
     views_analyzed: int = 0
     views_with_changes: int = 0
     matched_views: List[str] = Field(default_factory=list)
+    # view_name -> {matched_to, how} for name/measure-similarity matches.
+    fuzzy_matched: Dict[str, Dict[str, str]] = Field(default_factory=dict)
     unmatched_views: List[str] = Field(default_factory=list)
     note: Optional[str] = None
     error: Optional[str] = None

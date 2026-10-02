@@ -14,7 +14,8 @@ with a fake and the module never imports an orchestrator or hits a network.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+import difflib
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -54,6 +55,64 @@ def _load_view(yaml_text: str) -> Dict[str, Any]:
 def _norm(expr: str) -> str:
     """Collapse whitespace so cosmetic reformatting isn't flagged as a change."""
     return " ".join((expr or "").split())
+
+
+def measure_names(yaml_text: str) -> set:
+    """The set of measure names declared in a UC Metric View YAML (empty on junk)."""
+    return {n.strip().lower() for n in _load_view(yaml_text).get("measures", {})}
+
+
+def _name_key(view: str) -> str:
+    """Normalise a view/file name for fuzzy matching: lower-case, drop the common
+    `_uc_metric_view` suffix and separators so `FT_PE005` ≈ `ft-pe005`."""
+    s = (view or "").strip().lower()
+    s = s.replace("_uc_metric_view", "")
+    for ch in ("_", "-", ".", " "):
+        s = s.replace(ch, "")
+    return s
+
+
+def resolve_original(
+    view: str, corrected_yaml: str, originals: Dict[str, str]
+) -> Tuple[Optional[str], str]:
+    """Find our original view for an uploaded one. Returns (original_key, how).
+
+    ``how`` is one of ``exact`` / ``fuzzy_name`` / ``fuzzy_measures`` / ``none``.
+    Tries, in order: exact name, then high name-similarity, then highest
+    measure-set overlap — so a renamed-but-same-content deployed YAML still pairs
+    with what we generated (and we learn from the correction) instead of being
+    dropped as unmatched.
+    """
+    if not originals:
+        return None, "none"
+    if view in originals:
+        return view, "exact"
+
+    # 1) Name similarity (normalised), ≥ 0.80 ratio.
+    target = _name_key(view)
+    best_name, best_ratio = None, 0.0
+    for k in originals:
+        r = difflib.SequenceMatcher(None, target, _name_key(k)).ratio()
+        if r > best_ratio:
+            best_name, best_ratio = k, r
+    if best_name is not None and best_ratio >= 0.80:
+        return best_name, "fuzzy_name"
+
+    # 2) Measure-set overlap (Jaccard), ≥ 0.50 — catches heavy renames.
+    corr = measure_names(corrected_yaml)
+    if corr:
+        best_m, best_j = None, 0.0
+        for k, oy in originals.items():
+            om = measure_names(oy)
+            if not om:
+                continue
+            j = len(corr & om) / len(corr | om)
+            if j > best_j:
+                best_m, best_j = k, j
+        if best_m is not None and best_j >= 0.50:
+            return best_m, "fuzzy_measures"
+
+    return None, "none"
 
 
 def diff_view(original_yaml: str, corrected_yaml: str) -> Dict[str, Any]:
@@ -119,21 +178,28 @@ filter changes.
 
 Your job: distil the RECURRING, GENERALISABLE lessons — patterns that show up \
 across MULTIPLE measures or views — into a domain-context README that will be fed \
-back into future translations of THIS customer's model. Capture things like:
-- Vocabulary / column mappings they consistently apply (e.g. a raw column renamed \
-to a business dimension).
-- Recurring SQL corrections (e.g. "prefer the booked cost column over recomputing \
-from components", a consistent filter like a scenario/version code).
-- Naming, unit, scenario, and fiscal-calendar conventions (e.g. prior-year uses a \
-calendar date_py join).
+back into future translations of THIS customer's model, so we stop repeating the \
+same mistakes. Produce TWO clearly-headed sections:
+
+## DAX translation corrections (self-healing — most errors happen here)
+The highest-value section. From the `ours:` vs `corrected:` SQL pairs, extract the
+RECURRING DAX→SQL translation mistakes and state the rule that fixes each, so the
+next translation gets it right the first time. For each pattern give: the DAX
+shape / measure kind, what we did WRONG, and the CORRECT SQL form. A short, generic
+SQL snippet IS welcome here (it is a translation instruction, not customer data) —
+but generalise the pattern, don't just echo one measure.
+
+## Model domain context
+Vocabulary / column mappings they consistently apply, recurring business filters
+(e.g. a scenario/version code), and naming / unit / scenario / fiscal-calendar
+conventions (e.g. prior-year uses a calendar date_py join).
 
 Rules:
 - Only report a pattern you see MORE THAN ONCE, or that is clearly a model-wide \
 convention. Ignore one-off, measure-specific tweaks — those do not generalise.
-- Be concrete and cite the kind of measure, but do NOT dump raw SQL verbatim.
-- Output GitHub-flavoured Markdown, structured with headings and bullet lists, \
-suitable for pasting into a "Domain context" field. No preamble, no code fences \
-around the whole document."""
+- Output GitHub-flavoured Markdown with those two headings and bullet lists, \
+suitable for pasting into a "Domain context" field (which is fed into the DAX→SQL \
+translation prompt). No preamble, no code fences around the whole document."""
 
 
 def build_distillation_prompt(

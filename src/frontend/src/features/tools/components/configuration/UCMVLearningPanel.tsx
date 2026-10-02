@@ -185,6 +185,10 @@ export const UCMVLearningPanel: React.FC<UCMVLearningPanelProps> = ({
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
           <Typography variant="caption" color="text.secondary">
             Learned from {result.views_with_changes} changed view(s)
+            {result.fuzzy_matched && Object.keys(result.fuzzy_matched).length > 0 &&
+              ` · similarity-matched: ${Object.entries(result.fuzzy_matched)
+                .map(([v, m]) => `${v}→${m.matched_to}`)
+                .join(', ')}`}
             {result.unmatched_views.length > 0 &&
               ` · unmatched: ${result.unmatched_views.join(', ')}`}
           </Typography>
