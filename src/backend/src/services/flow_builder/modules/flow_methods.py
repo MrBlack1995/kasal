@@ -5,6 +5,7 @@ This module handles dynamic creation of flow methods (starting points, listeners
 """
 
 import asyncio
+import os
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -24,10 +25,14 @@ from .flow_conditions import state_snapshot
 logger = LoggerManager.get_instance().flow
 
 # Per-crew kickoff timeout for flow execution. Large Power BI models (hundreds of
-# measures, dozens of fact tables + opt-in LLM DAX translation) can legitimately
-# take longer than the original 10 min. Bumped to 20 min as headroom; the DAX LLM
-# fallback is also now bounded-concurrent so it finishes far faster than before.
-CREW_KICKOFF_TIMEOUT_SECONDS = 1200.0
+# measures, dozens of fact tables + opt-in LLM DAX translation + reconciliation
+# cycles) can legitimately take a long time. The M→SQL recovery and DAX LLM
+# fallback are bounded-concurrent so they finish far faster than before, but the
+# heaviest reconciliation runs on the most complex models still need headroom —
+# so this defaults to 40 min and is overridable via env for extreme cases.
+CREW_KICKOFF_TIMEOUT_SECONDS = float(
+    os.getenv("KASAL_FLOW_CREW_TIMEOUT_SECONDS", "2400")
+)
 
 
 def extract_final_answer(results) -> str:
@@ -1585,7 +1590,9 @@ class FlowMethodFactory:
                             _inner = getattr(_raw_tool, "kasal_tool", None)
                             tool = (
                                 _inner
-                                if isinstance(getattr(_inner, "_default_config", None), dict)
+                                if isinstance(
+                                    getattr(_inner, "_default_config", None), dict
+                                )
                                 else _raw_tool
                             )
                             if not hasattr(tool, "_default_config") or not isinstance(

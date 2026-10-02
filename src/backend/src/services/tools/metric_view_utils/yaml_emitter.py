@@ -76,6 +76,30 @@ def _check_metadata_limits(spec: MetricViewSpec) -> list[str]:
     return warnings
 
 
+# Unity Catalog rejects a view/column COMMENT longer than 4000 chars, so the
+# emitted comment must fit even when provenance/usage annotations make it long.
+_UC_MAX_COMMENT_LENGTH = 4000
+
+
+def _fit_comment(comment: str) -> str:
+    """Truncate a comment to Unity Catalog's 4000-char limit so deploy succeeds.
+
+    The metadata lint only WARNS about an over-long comment; this is what makes it
+    deployable. Cuts on a line boundary where possible and appends a marker so a
+    reviewer knows the comment was shortened (the full provenance still lives in
+    the migration report).
+    """
+    if not comment or len(comment) <= _UC_MAX_COMMENT_LENGTH:
+        return comment
+    marker = "\n… [truncated to fit Unity Catalog's 4000-char comment limit]"
+    budget = _UC_MAX_COMMENT_LENGTH - len(marker)
+    head = comment[:budget]
+    nl = head.rfind("\n")
+    if nl > budget - 400:  # prefer a clean line break when one is close to the end
+        head = head[:nl]
+    return head.rstrip() + marker
+
+
 # ─── YAML formatting helpers ─────────────────────────────────────────────────
 
 
@@ -495,7 +519,7 @@ def emit_yaml(
             lines.append(f"filter: {_yaml_scalar(spec.source_filter, indent=0)}")
     lines.append("")
     lines.append("comment: |-")
-    for comment_line in spec.comment.split("\n"):
+    for comment_line in _fit_comment(spec.comment).split("\n"):
         lines.append(f"  {comment_line}")
 
     # Validate join tables: drop joins referencing known-missing tables.
@@ -555,8 +579,7 @@ def emit_yaml(
     dax_measures = [
         m
         for m in spec.measures
-        if m.category
-        not in ("base", "switch_decomposition", "implicit_visual_column")
+        if m.category not in ("base", "switch_decomposition", "implicit_visual_column")
     ]
     switch_measures = [m for m in spec.measures if m.category == "switch_decomposition"]
     # Raw columns with PBI's own implicit aggregation, drawn/filtered in a
@@ -647,7 +670,12 @@ def emit_yaml(
             m.sql_expr = spark_sql_compat(m.sql_expr, _cat, _sch)
 
     # Security: reject measures with dangerous SQL patterns
-    for measure_list in (base_measures, dax_measures, switch_measures, implicit_measures):
+    for measure_list in (
+        base_measures,
+        dax_measures,
+        switch_measures,
+        implicit_measures,
+    ):
         drop_idx = []
         for i, m in enumerate(measure_list):
             if m.sql_expr and not _check_dangerous_sql(m.sql_expr):
@@ -931,7 +959,9 @@ def emit_yaml(
     if spec.dimensions:
         _measure_names = {
             m.measure_name
-            for m in (base_measures + dax_measures + switch_measures + implicit_measures)
+            for m in (
+                base_measures + dax_measures + switch_measures + implicit_measures
+            )
         }
         if _measure_names:
             spec.dimensions = [

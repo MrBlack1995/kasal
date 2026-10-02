@@ -6,7 +6,23 @@ from src.services.tools.metric_view_utils.data_classes import (
     MetricViewSpec,
     TranslationResult,
 )
-from src.services.tools.metric_view_utils.yaml_emitter import emit_yaml
+from src.services.tools.metric_view_utils.yaml_emitter import (
+    _UC_MAX_COMMENT_LENGTH,
+    _fit_comment,
+    emit_yaml,
+)
+
+
+def test_fit_comment_truncates_over_the_uc_limit():
+    long = "line\n" * 3000  # ~15000 chars, well over 4000
+    out = _fit_comment(long)
+    assert len(out) <= _UC_MAX_COMMENT_LENGTH
+    assert "truncated" in out
+
+
+def test_fit_comment_leaves_short_comment_untouched():
+    assert _fit_comment("short comment") == "short comment"
+    assert _fit_comment("") == ""
 
 
 @pytest.fixture
