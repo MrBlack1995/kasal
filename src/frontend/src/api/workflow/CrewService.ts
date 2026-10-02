@@ -87,28 +87,26 @@ export class CrewService {
    * from the catalog it already holds.
    */
   static async duplicateCrew(id: string, newName: string): Promise<CrewResponse> {
+    // Deep clone through the backend so the copy gets its OWN agent/task rows.
+    // The old client-side re-POST referenced the source crew's agent_ids/task_ids,
+    // so editing the "copy" mutated the original's underlying rows.
+    return this.cloneCrew(id, newName);
+  }
+
+  /**
+   * Clone a crew into a NEW, independent crew ("Save as new crew") via
+   * `POST /crews/{id}/clone`. The backend duplicates the crew's agents and tasks
+   * (new rows) and rebuilds the canvas with the clone's IDs, so editing the copy
+   * never changes the original. `name` is optional — the backend defaults to
+   * "<original> (copy)" and returns 409 on a name clash so the caller can prompt
+   * for a different name.
+   */
+  static async cloneCrew(id: string, name?: string): Promise<CrewResponse> {
     try {
-      const source = await this.getCrew(id);
-      const payload: CrewCreate = {
-        name: newName,
-        agent_ids: source.agent_ids ?? [],
-        task_ids: source.task_ids ?? [],
-        nodes: source.nodes ?? [],
-        edges: source.edges ?? [],
-        process: source.process,
-        reasoning: source.reasoning,
-        reasoning_llm: source.reasoning_llm,
-        reasoning_config: source.reasoning_config,
-        manager_llm: source.manager_llm,
-        tool_configs: source.tool_configs,
-        memory: source.memory,
-        verbose: source.verbose,
-        max_rpm: source.max_rpm,
-      };
-      const response = await API.post('/crews', payload);
+      const response = await API.post(`/crews/${id}/clone`, { name: name ?? null });
       return response.data;
     } catch (error) {
-      console.error('Error duplicating crew:', error);
+      console.error('Error cloning crew:', error);
       throw error;
     }
   }
