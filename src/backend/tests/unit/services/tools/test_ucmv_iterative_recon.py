@@ -3,7 +3,10 @@ tools into the reconciliation loop. Fakes stand in for the real tools; no networ
 
 import json
 
-from src.services.tools.ucmv_iterative_recon import run_iterative_ucmv_generation
+from src.services.tools.ucmv_iterative_recon import (
+    _carry_forward_overrides,
+    run_iterative_ucmv_generation,
+)
 
 
 class _FakeGenerator:
@@ -332,3 +335,112 @@ def test_generator_single_pass_when_bridge_returns_none():
             )
         )
     assert "stop_reason" not in out
+
+
+# ── Incremental refinement: carry forward reconciled measures across cycles ──
+
+
+def test_carry_forward_overrides_reuses_passing_and_skips_failing():
+    resolved = {
+        "fact_a": [
+            {"measure_name": "good", "sql_expr": "SUM(x)", "original_name": "Good"},
+            {"measure_name": "bug", "sql_expr": "SUM(y)", "original_name": "Bug"},
+        ]
+    }
+    specs = {"fact_a": {"view_name": "v"}}
+    feedback = [{"view": "v", "measure": "bug", "pct_aligned": 70}]
+    ov = _carry_forward_overrides(resolved, specs, feedback)
+    assert set(o["name"] for o in ov["fact_a"]) == {"good"}  # passing carried
+    assert ov["fact_a"][0]["expr"] == "SUM(x)"
+
+
+def test_carry_forward_excludes_failing_even_when_view_unmapped():
+    # No view→table map → the failing measure is still excluded by name (safe).
+    resolved = {"fact_a": [{"measure_name": "bug", "sql_expr": "SUM(y)"}]}
+    ov = _carry_forward_overrides(resolved, {}, [{"view": "zz", "measure": "bug"}])
+    assert ov == {}
+
+
+def test_carry_forward_empty_without_feedback_or_resolved():
+    assert _carry_forward_overrides({}, {}, [{"measure": "x"}]) == {}
+    assert (
+        _carry_forward_overrides(
+            {"t": [{"measure_name": "m", "sql_expr": "S"}]}, {}, []
+        )
+        == {}
+    )
+
+
+class _FakeGenWithResolved:
+    """Records the manual_overrides it received each cycle; emits resolved/specs."""
+
+    def __init__(self):
+        self.manual_overrides_seen = []
+
+    def _run(self, **kwargs):
+        self.manual_overrides_seen.append(kwargs.get("manual_overrides"))
+        return json.dumps(
+            {
+                "yaml": {"v": "y"},
+                "pbi_ucmv_mapping": {"v": "m"},
+                "specs_summary": {"fact_a": {"view_name": "v"}},
+                "resolved_measures_by_table": {
+                    "fact_a": [
+                        {"measure_name": "good", "sql_expr": "SUM(x)"},
+                        {"measure_name": "bug", "sql_expr": "SUM(y)"},
+                    ]
+                },
+            }
+        )
+
+
+class _ReconGoodBug:
+    """`good` always 100%; `bug` follows the scripted pcts."""
+
+    def __init__(self, bug_pcts):
+        self._p = list(bug_pcts)
+        self._i = 0
+
+    def _run(self, **kwargs):
+        bug = self._p[self._i]
+        self._i += 1
+        return json.dumps(
+            {
+                "views": {
+                    "v": {
+                        "measures": {
+                            "good": {"pct_aligned": 100, "classification": "aligned"},
+                            "bug": {
+                                "pct_aligned": bug,
+                                "classification": "real_error",
+                                "sample_mismatches": [],
+                            },
+                        }
+                    }
+                },
+                "overall": {
+                    "measures_at_100": 2 if bug >= 100 else 1,
+                    "total_measures": 2,
+                    "cells_total": 200,
+                    "overall_cell_pct": (100 + bug) / 2,
+                },
+            }
+        )
+
+
+def test_refine_cycle_carries_forward_passing_measures_only():
+    gen = _FakeGenWithResolved()
+    run_iterative_ucmv_generation(
+        generator=gen,
+        deployer=_FakeDeployer(ok=True),
+        reconciler=_ReconGoodBug([70, 100]),
+        gen_kwargs={"measures_json": "[]"},
+        deploy_kwargs={},
+        recon_kwargs={},
+        max_cycles=5,
+        target_pct=100,
+    )
+    # Cycle 1: no overrides. Cycle 2: carry forward the passing `good`, NOT `bug`.
+    assert gen.manual_overrides_seen[0] is None
+    mo = gen.manual_overrides_seen[1]
+    assert mo and set(o["name"] for o in mo["fact_a"]) == {"good"}

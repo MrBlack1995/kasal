@@ -40,6 +40,55 @@ def _loads(raw: Any) -> dict:
         return {}
 
 
+def _carry_forward_overrides(
+    resolved_by_table: dict, specs_summary: dict, feedback: list
+) -> dict:
+    """Build ``manual_overrides`` reusing the prior cycle's SQL for every measure
+    NOT flagged as a failure in ``feedback``.
+
+    Returns ``{table_key: [{name, original_name, expr, comment}, ...]}``. The ONLY
+    measures left out (so they get re-translated) are the ones the reconciler said
+    missed — everything already reconciled (or classified as drift / not scored)
+    is carried forward verbatim. Correctness-first: a measure name that failed is
+    excluded even if the view→table map is incomplete, so a miss is never carried
+    forward; the cost of being wrong here is a redundant re-translation, never a
+    stale-but-wrong measure.
+    """
+    if not resolved_by_table or not feedback:
+        return {}
+    view_to_table = {
+        (info or {}).get("view_name"): tk
+        for tk, info in (specs_summary or {}).items()
+        if (info or {}).get("view_name")
+    }
+    failing: set = set()
+    for item in feedback:
+        if not isinstance(item, dict) or not item.get("measure"):
+            continue
+        # tk may be None when the view→table map misses — kept as a name-only
+        # guard so the measure is still excluded from carry-forward.
+        failing.add((view_to_table.get(item.get("view")), item["measure"]))
+
+    overrides: dict = {}
+    for tk, rows in resolved_by_table.items():
+        for r in rows or []:
+            name = r.get("measure_name")
+            expr = r.get("sql_expr")
+            if not name or not expr:
+                continue
+            if (tk, name) in failing or (None, name) in failing:
+                continue  # a missed measure → re-translate; do not carry forward
+            overrides.setdefault(tk, []).append(
+                {
+                    "name": name,
+                    "original_name": r.get("original_name") or name,
+                    "expr": expr,
+                    "comment": "carried forward (reconciled in prior cycle)",
+                }
+            )
+    return overrides
+
+
 def run_iterative_ucmv_generation(
     *,
     generator,
@@ -64,12 +113,37 @@ def run_iterative_ucmv_generation(
     deploy_kwargs = dict(deploy_kwargs or {})
     recon_kwargs = dict(recon_kwargs or {})
 
+    # Carry-forward state: the prior cycle's translations + view→table map, so a
+    # refine cycle reuses already-reconciled measures instead of re-translating
+    # the whole model.
+    _cf: dict = {"resolved": {}, "specs": {}}
+
     def generate(feedback) -> dict:
         kw = dict(gen_kwargs)
         if feedback:
             # The generator normalises this into the DAX LLM's per-measure hints.
             kw["refinement_feedback"] = json.dumps(feedback)
+            # Incremental refinement: reuse SQL for every measure NOT flagged as a
+            # failure, so only the missed measures hit the LLM again this cycle.
+            overrides = _carry_forward_overrides(
+                _cf["resolved"], _cf["specs"], feedback
+            )
+            if overrides:
+                merged = {
+                    k: list(v) for k, v in (kw.get("manual_overrides") or {}).items()
+                }
+                for tk, entries in overrides.items():
+                    merged.setdefault(tk, []).extend(entries)
+                kw["manual_overrides"] = merged
+                logger.info(
+                    "[UCMV] incremental refine: carrying forward %d measure(s) "
+                    "across %d table(s); only failures re-translated",
+                    sum(len(v) for v in overrides.values()),
+                    len(overrides),
+                )
         out = _loads(generator._run(**kw))
+        _cf["resolved"] = out.get("resolved_measures_by_table") or {}
+        _cf["specs"] = out.get("specs_summary") or {}
         return {
             "yaml": out.get("yaml") or {},
             "mappings": out.get("pbi_ucmv_mapping") or {},

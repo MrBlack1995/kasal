@@ -773,6 +773,29 @@ class UCMetricViewGeneratorTool(BaseTool):
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(f"[UCMV] Failed to parse implicit_column_measures: {e}")
 
+        # Carry-forward overrides from the reconciliation loop: measures that
+        # already reconciled in a PRIOR cycle arrive as manual_overrides so
+        # table_processor reuses their SQL verbatim and drops them from the LLM
+        # batch — only the measures that MISSED are re-translated on a refine
+        # cycle. Same bucket shape / merge semantics as the blocks above.
+        _mo_raw = _get("manual_overrides")
+        if _mo_raw:
+            try:
+                _mo = (
+                    _parse_json_input(_mo_raw, {})
+                    if isinstance(_mo_raw, str)
+                    else _mo_raw
+                )
+                if isinstance(_mo, dict) and _mo:
+                    config.setdefault("manual_overrides", {})
+                    for _tbl, _entries in _mo.items():
+                        if isinstance(_entries, list):
+                            config["manual_overrides"].setdefault(_tbl, []).extend(
+                                _entries
+                            )
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"[UCMV] Failed to parse manual_overrides: {e}")
+
         # Capture the ORIGINAL source expression per table BEFORE the M→SQL LLM
         # recovery below rewrites it, so the UI can show the FULL raw Power Query M
         # (not just the derived Source SQL) and audit which transformation steps it
