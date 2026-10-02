@@ -213,6 +213,51 @@ class CrewService:
             logger.warning(f"CrewService: catalog tool_configs hydrate skipped: {e}")
         return crews
 
+    async def _sync_task_rows_from_nodes(
+        self, crew: Optional[Crew], group_context: GroupContext
+    ) -> None:
+        """Write each task node's ``tool_configs`` through to its TASK ROW on save.
+
+        The task row is the source of truth every read hydrates from (and what flow
+        execution re-reads). A crew save persists ``crew.nodes`` but not the task
+        rows, so without this, editing a tool's config on the canvas and saving the
+        CREW would leave the task row — and thus every drill-through / reload —
+        stale. This makes it not matter where you save: the edit always reaches the
+        source of truth. Routes through the owning ``TaskService`` (group-checked).
+        Best-effort per task; a failure never fails the crew save.
+        """
+        if crew is None:
+            return
+        nodes = getattr(crew, "__dict__", {}).get("nodes")
+        if not isinstance(nodes, list) or not nodes:
+            return
+        try:
+            from src.schemas.task import TaskUpdate
+            from src.services.catalog.tasks import TaskService
+
+            task_svc = TaskService(self.session)
+            valid_ids = {str(t) for t in (getattr(crew, "task_ids", None) or [])}
+            for node in nodes:
+                if not isinstance(node, dict) or node.get("type") != "taskNode":
+                    continue
+                data = node.get("data")
+                if not isinstance(data, dict):
+                    continue
+                cfg = data.get("tool_configs")
+                if not isinstance(cfg, dict) or not cfg:
+                    continue
+                nid = node.get("id") or ""
+                tid = str(
+                    data.get("taskId") or (nid.split("-", 1)[1] if "-" in nid else nid)
+                )
+                if valid_ids and tid not in valid_ids:
+                    continue
+                await task_svc.update_with_group_check(
+                    tid, TaskUpdate(tool_configs=cfg), group_context
+                )
+        except Exception as e:  # noqa: BLE001 — never fail the crew save over it
+            logger.warning(f"CrewService: task-row tool_configs sync skipped: {e}")
+
     async def get(self, id: UUID) -> Optional[Crew]:
         """
         Get a crew by ID with decrypted tool_configs.
@@ -480,12 +525,14 @@ class CrewService:
                 )
                 crew = await self.repository.update(existing.id, crew_data) or existing
                 self._decrypt_crew_tool_configs(crew)
+                await self._sync_task_rows_from_nodes(crew, group_context)
                 return crew
 
             # Create the model using the serialized data
             crew_data["created_by_email"] = group_context.group_email
             crew = await self.repository.create(crew_data)
             self._decrypt_crew_tool_configs(crew)
+            await self._sync_task_rows_from_nodes(crew, group_context)
             return crew
         except Exception as e:
             logger.error(f"Error creating crew with group: {str(e)}")
@@ -686,7 +733,12 @@ class CrewService:
             update_data = self._encrypt_tool_configs_in_data(update_data)
 
         crew = await self.repository.update(id, update_data)
-        return self._decrypt_crew_tool_configs(crew)
+        self._decrypt_crew_tool_configs(crew)
+        # Only sync task rows when this save actually carried nodes (a name-only
+        # partial update has nothing to propagate).
+        if "nodes" in update_data:
+            await self._sync_task_rows_from_nodes(crew, group_context)
+        return crew
 
     async def delete_by_group(self, id: UUID, group_context: GroupContext) -> bool:
         """
