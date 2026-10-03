@@ -8,6 +8,7 @@ import IconButton from '@mui/material/IconButton';
 import EditIcon from '@mui/icons-material/Edit';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import { Task, TaskService } from '../../../../api/workflow/TaskService';
@@ -378,6 +379,9 @@ const TaskNode: React.FC<TaskNodeProps> = ({ data, id }) => {
         return <CheckCircleIcon sx={{ fontSize: 16, color: 'success.main' }} />;
       case 'failed':
         return <ErrorIcon sx={{ fontSize: 16, color: 'error.main' }} />;
+      case 'warning':
+        // Late timeout: finished, outputs saved — orange, not red.
+        return <WarningAmberIcon sx={{ fontSize: 16, color: 'warning.main' }} />;
       default:
         return null;
     }
@@ -387,6 +391,7 @@ const TaskNode: React.FC<TaskNodeProps> = ({ data, id }) => {
     const isRunning = taskStatus?.status === 'running';
     const isCompleted = taskStatus?.status === 'completed';
     const isFailed = taskStatus?.status === 'failed';
+    const isWarning = taskStatus?.status === 'warning';
 
     const baseStyles = {
       width: 270,
@@ -407,6 +412,7 @@ const TaskNode: React.FC<TaskNodeProps> = ({ data, id }) => {
         if (isRunning) return theme.palette.info.main;
         if (isCompleted) return theme.palette.success.main;
         if (isFailed) return theme.palette.error.main;
+        if (isWarning) return theme.palette.warning.main;
         return isSelected
           ? theme.palette.primary.main
           : 'transparent';

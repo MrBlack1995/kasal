@@ -8,6 +8,7 @@ import { runService } from '../../../../api/execution/ExecutionHistoryService';
 import { useTaskExecutionStore } from '../../../../store/taskExecutionStore';
 import { useChatMessagesStore } from '../store/chatMessagesStore';
 import { extractTaskId, extractTaskName, mapEventToStatus } from '../../../../utils/taskIdUtils';
+import { isLateTimeoutError } from '../../../../utils/lateTimeout';
 
 export const useExecutionMonitoring = (
   sessionId: string,
@@ -176,13 +177,6 @@ export const useExecutionMonitoring = (
 
       if (currentExecutingJobId === jobId || jobId === currentLastExecutionJobId) {
         settledJobsRef.current.add(jobId);
-        // Transition all "running" or "planning" tasks to "failed"
-        useTaskExecutionStore.getState().transitionAll(
-          ['running', 'planning'],
-          'failed',
-          { failed_at: new Date().toISOString() }
-        );
-
         // A "Listener crew execution timed out" is the benign long-run case: the
         // crews did their work (e.g. the UC Metric Views are generated + deployed)
         // and the timeout hit afterwards, finalizing — a stale/dropped DB
@@ -192,8 +186,18 @@ export const useExecutionMonitoring = (
         // had actually succeeded. The underlying status is left accurate (not
         // masked) and a genuine hang still surfaces here — the wording holds for
         // both because it points the user to verify their outputs.
-        const isLateTimeout =
-          typeof error === 'string' && /timed out/i.test(error);
+        const isLateTimeout = isLateTimeoutError(error);
+
+        // Transition still-running/planning tasks to the matching terminal state:
+        // orange 'warning' for a late timeout (outputs saved), red 'failed' otherwise.
+        useTaskExecutionStore.getState().transitionAll(
+          ['running', 'planning'],
+          isLateTimeout ? 'warning' : 'failed',
+          isLateTimeout
+            ? { completed_at: new Date().toISOString() }
+            : { failed_at: new Date().toISOString() }
+        );
+
         const failureMessage: ChatMessage = {
           id: `exec-failed-${Date.now()}`,
           type: 'execution',
