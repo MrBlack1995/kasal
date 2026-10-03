@@ -6,6 +6,7 @@ This module handles dynamic creation of flow methods (starting points, listeners
 
 import asyncio
 import os
+import traceback
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -1040,6 +1041,15 @@ class FlowMethodFactory:
                 logger.error(
                     f"❌ Crew '{crew_name}' execution timed out after {elapsed_time:.2f} seconds (limit: {CREW_KICKOFF_TIMEOUT_SECONDS:.0f}s)"
                 )
+                # Diagnostic: the full stack of the TimeoutError names its true
+                # source (a run/agent max_execution_time deadline vs a DB
+                # operation hanging on a dropped idle connection) — the one thing
+                # the status logs don't reveal. Needed to fix the long-run timeout
+                # precisely instead of guessing.
+                logger.error(
+                    "Starting-point crew timeout — originating traceback:\n%s",
+                    traceback.format_exc(),
+                )
                 raise TimeoutError(
                     f"Crew '{crew_name}' execution timed out after {CREW_KICKOFF_TIMEOUT_SECONDS / 60:.0f} minutes"
                 )
@@ -1843,6 +1853,15 @@ class FlowMethodFactory:
                 elapsed_time = time.time() - start_time if "start_time" in dir() else 0
                 logger.error(
                     f"❌ Listener crew execution timed out after {elapsed_time:.2f} seconds (limit: {CREW_KICKOFF_TIMEOUT_SECONDS:.0f}s)"
+                )
+                # Diagnostic: the full stack of the TimeoutError names its true
+                # source (a run/agent max_execution_time deadline vs a DB
+                # operation hanging on a dropped idle connection) — the one thing
+                # the status logs don't reveal. Needed to fix the long-run timeout
+                # precisely instead of guessing.
+                logger.error(
+                    "Listener crew timeout — originating traceback:\n%s",
+                    traceback.format_exc(),
                 )
                 raise TimeoutError("Listener crew execution timed out")
             except Exception as e:
