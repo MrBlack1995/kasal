@@ -17,6 +17,7 @@ Executor contracts:
 
 from __future__ import annotations
 
+import concurrent.futures
 from typing import Optional
 
 import pandas as pd
@@ -25,6 +26,29 @@ from . import pbi_query as pq
 from .mapping import UCMVMapping
 from .periods import normalize_snapshot_date
 from .values import parse_value
+
+# Max concurrent PBI network queries issued WITHIN one view. A view's
+# per-measure-group DAX queries are independent network I/O, so they run on a
+# bounded thread pool (the executor is synchronous) instead of one-at-a-time.
+# Post-processing (parse/merge) stays sequential and in input order, so results
+# are byte-for-byte identical to a serial run — only wall-clock changes.
+_RECON_QUERY_CONCURRENCY = 6
+
+
+def _execute_many(executor, model_id, daxes: list) -> list:
+    """``executor.execute(model_id, dax)`` for each dax, concurrently (bounded),
+    returning ``(df, err)`` tuples in the SAME order as ``daxes``.
+
+    A single query runs inline (no pool). Exceptions propagate exactly as a serial
+    run would raise them, preserving the callers' fatal/fail-open semantics.
+    """
+    if not daxes:
+        return []
+    if len(daxes) == 1:
+        return [executor.execute(model_id, daxes[0])]
+    max_workers = min(_RECON_QUERY_CONCURRENCY, len(daxes))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(lambda dax: executor.execute(model_id, dax), daxes))
 
 
 def _rename_first_two_cols(df: pd.DataFrame, dimension_name: str) -> pd.DataFrame:
@@ -63,17 +87,21 @@ def _run_direct_queries(
     filter_groups: dict = {}
     for m in direct:
         filter_groups.setdefault(pq._extra_filter_key(m), []).append(m)
+    # Build every group's DAX first, then run the (non-empty) queries concurrently;
+    # process results in the SAME order the groups merged serially.
+    pending = []
     for group_measures in filter_groups.values():
         dax = pq.build_direct_query(
             mapping, dimension_name, dimension_values, group_measures
         )
-        if not dax:
-            continue
-        df, err = executor.execute(model_id, dax)
+        if dax:
+            pending.append((dax, group_measures))
+    outcomes = _execute_many(executor, model_id, [dax for dax, _ in pending])
+    strict = mapping.binding.time_dimension.grain == "snapshot"
+    for (dax, group_measures), (df, err) in zip(pending, outcomes):
         if df is None or df.empty:
             raise RuntimeError(f"DAX query failed (direct measures): {err}")
         df = _rename_first_two_cols(df, dimension_name)
-        strict = mapping.binding.time_dimension.grain == "snapshot"
         for m in group_measures:
             df[m.ucmv_measure] = parse_value(
                 df[m.ucmv_measure], m.value_format, strict=strict
@@ -95,12 +123,22 @@ def _run_direct_context_queries(
     ctx_filter_groups: dict = {}
     for m in direct_context:
         ctx_filter_groups.setdefault(pq._extra_filter_key(m), []).append(m)
-    for ctx_group in ctx_filter_groups.values():
-        per_period_rows = []
+    groups = list(ctx_filter_groups.values())
+    # Flatten every (group, period) query, run them all concurrently, then
+    # re-group the results per group IN ORDER so the merge is identical to serial.
+    flat: list = []  # (group_index, period, dax)
+    for gi, ctx_group in enumerate(groups):
         for dax, period in pq.build_direct_context_queries(
             mapping, dimension_name, dimension_values, context_periods, ctx_group
         ):
-            df, _ = executor.execute(model_id, dax)
+            flat.append((gi, period, dax))
+    outcomes = _execute_many(executor, model_id, [dax for _, _, dax in flat])
+    rows_by_group: dict = {gi: [] for gi in range(len(groups))}
+    for (gi, period, _dax), (df, _err) in zip(flat, outcomes):
+        rows_by_group[gi].append((period, df))
+    for gi, ctx_group in enumerate(groups):
+        per_period_rows = []
+        for period, df in rows_by_group[gi]:
             if df is None or df.empty:
                 continue
             df = df.rename(columns={c: pq.strip_table_prefix(c) for c in df.columns})
@@ -148,10 +186,11 @@ def _run_switch_queries(
     result: Optional[pd.DataFrame] = None
     failed_measures: list = []
     strict = mapping.binding.time_dimension.grain == "snapshot"
-    for dax, group_measures, sel_col, sel2_col in pq.build_switch_queries(
-        mapping, dimension_name, dimension_values, switch
-    ):
-        df, _ = executor.execute(model_id, dax)
+    specs = list(
+        pq.build_switch_queries(mapping, dimension_name, dimension_values, switch)
+    )
+    outcomes = _execute_many(executor, model_id, [dax for dax, *_ in specs])
+    for (dax, group_measures, sel_col, sel2_col), (df, _err) in zip(specs, outcomes):
         if df is None or df.empty:
             failed_measures.extend(m.ucmv_measure for m in group_measures)
             continue

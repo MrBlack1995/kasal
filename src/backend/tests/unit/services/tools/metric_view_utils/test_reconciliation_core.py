@@ -588,3 +588,47 @@ def test_run_ucmv_query_empty_raises():
 
     with pytest.raises(RuntimeError):
         r.run_ucmv_query(E(), "SELECT 1", "country")
+
+
+# ── Bounded-concurrency query execution (runner._execute_many) ──────────────
+
+from src.services.tools.metric_view_utils.reconciliation import runner as _runner
+
+
+def test_execute_many_preserves_order_under_concurrency():
+    """Results come back in INPUT order even though later queries finish first —
+    so the downstream in-order merge is identical to a serial run."""
+    import time as _t
+
+    class _OrderExec:
+        def execute(self, model_id, dax):
+            n = int(dax)
+            _t.sleep(0.02 * (6 - n))  # earlier indices sleep longer
+            return pd.DataFrame([{"n": n}]), None
+
+    out = _runner._execute_many(_OrderExec(), "mid", [str(i) for i in range(6)])
+    assert [df.iloc[0]["n"] for df, _ in out] == list(range(6))
+
+
+def test_execute_many_edge_cases():
+    class _Exec:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, model_id, dax):
+            self.calls += 1
+            return pd.DataFrame([{"x": dax}]), None
+
+    assert _runner._execute_many(_Exec(), "mid", []) == []
+    ex = _Exec()
+    out = _runner._execute_many(ex, "mid", ["only"])  # single → inline, no pool
+    assert ex.calls == 1 and out[0][0].iloc[0]["x"] == "only"
+
+
+def test_execute_many_propagates_exception_like_serial():
+    class _Boom:
+        def execute(self, model_id, dax):
+            raise RuntimeError("exec failed")
+
+    with pytest.raises(RuntimeError):
+        _runner._execute_many(_Boom(), "mid", ["a", "b", "c"])
