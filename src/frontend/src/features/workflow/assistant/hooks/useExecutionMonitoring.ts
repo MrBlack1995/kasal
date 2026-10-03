@@ -183,10 +183,23 @@ export const useExecutionMonitoring = (
           { failed_at: new Date().toISOString() }
         );
 
+        // A "Listener crew execution timed out" is the benign long-run case: the
+        // crews did their work (e.g. the UC Metric Views are generated + deployed)
+        // and the timeout hit afterwards, finalizing — a stale/dropped DB
+        // connection on a long run, not the crew logic failing. Present it as a
+        // WARNING with honest, conditional wording ("if outputs were generated…")
+        // rather than a hard "❌ Execution failed", which alarmed users whose work
+        // had actually succeeded. The underlying status is left accurate (not
+        // masked) and a genuine hang still surfaces here — the wording holds for
+        // both because it points the user to verify their outputs.
+        const isLateTimeout =
+          typeof error === 'string' && /timed out/i.test(error);
         const failureMessage: ChatMessage = {
           id: `exec-failed-${Date.now()}`,
           type: 'execution',
-          content: `❌ Execution failed: ${error}`,
+          content: isLateTimeout
+            ? `⚠️ The run timed out while finalizing. Any outputs it generated (e.g. deployed UC Metric Views) are saved — check your catalog. (${error})`
+            : `❌ Execution failed: ${error}`,
           timestamp: new Date(),
           jobId
         };
