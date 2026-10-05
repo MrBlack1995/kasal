@@ -280,7 +280,7 @@ class PipelineConfigGeneratorTool(BaseTool):
             gen = self._import_generate_config()
 
             # Resolve both tokens through the shared AadService — the SAME auth
-            # path the Semantic Model Fetcher and UC Metric View Generator use.
+            # path the UC Metric View Generator uses.
             # AadService supports Service Principal, Service Account, and User
             # OAuth, with explicit auth_method honoured and SP-first auto-detect.
             logger.info("[PipelineConfigGen] Acquiring tokens via shared AadService...")
@@ -398,7 +398,7 @@ class PipelineConfigGeneratorTool(BaseTool):
             # API 3: Admin Scanner (uses admin token). Graceful — the Power BI
             # Admin Scanner rejects Service-Account tokens (401/403), so this is
             # NOT fatal: on failure we fall back to Fabric TMDL (which a Service
-            # Account CAN read), mirroring the Semantic Model Fetcher.
+            # Account CAN read).
             admin_tables = {}
             # Raw TMDL parts kept for S6/S9/rec#9 enrichment when available.
             _tmdl_parts: list[dict] = []
@@ -2093,7 +2093,7 @@ class PipelineConfigGeneratorTool(BaseTool):
     ) -> str:
         """Resolve a Power BI token via the shared AadService.
 
-        Same auth path as the Semantic Model Fetcher and UC Metric View
+        Same auth path as the UC Metric View
         Generator: honours an explicit ``auth_method``; otherwise auto-detects
         Service Principal first, then Service Account. ``AadService`` is
         synchronous, so it is safe to call directly from this sync tool.

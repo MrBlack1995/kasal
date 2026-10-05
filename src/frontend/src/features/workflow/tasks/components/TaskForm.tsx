@@ -45,19 +45,12 @@ import { PerplexityConfigSelector } from '../../../tools/components/configuratio
 import { SerperConfigSelector } from '../../../tools/components/configuration/SerperConfigSelector';
 import RemoteAgentConfigSelector, { RemoteAgentToolConfig } from '../../../tools/components/configuration/RemoteAgentConfigSelector';
 import { MCPServerSelector } from '../../../tools/components/configuration/MCPServerSelector';
-import { PowerBIAnalysisConfigSelector, PowerBIAnalysisConfig } from '../../../tools/components/configuration/PowerBIAnalysisConfigSelector';
 import { MeasureConverterConfigSelector, MeasureConverterConfig } from '../../../tools/components/configuration/MeasureConverterConfigSelector';
-import { MQueryConverterConfigSelector, MQueryConverterConfig } from '../../../tools/components/configuration/MQueryConverterConfigSelector';
-import { PowerBIRelationshipsConfigSelector, PowerBIRelationshipsConfig } from '../../../tools/components/configuration/PowerBIRelationshipsConfigSelector';
 import { PowerBIHierarchiesConfigSelector, PowerBIHierarchiesConfig } from '../../../tools/components/configuration/PowerBIHierarchiesConfigSelector';
 import { PowerBIFieldParametersConfigSelector, PowerBIFieldParametersConfig } from '../../../tools/components/configuration/PowerBIFieldParametersConfigSelector';
 import { PowerBIReportReferencesConfigSelector, PowerBIReportReferencesConfig } from '../../../tools/components/configuration/PowerBIReportReferencesConfigSelector';
-import { PowerBIFetcherConfigSelector, PowerBIFetcherConfig } from '../../../tools/components/configuration/PowerBIFetcherConfigSelector';
-import { PowerBIDaxConfigSelector, PowerBIDaxConfig } from '../../../tools/components/configuration/PowerBIDaxConfigSelector';
-import { PowerBIMetadataReducerConfigSelector, PowerBIMetadataReducerConfig } from '../../../tools/components/configuration/PowerBIMetadataReducerConfigSelector';
 import { PowerBIDaxExecutorConfigSelector, PowerBIDaxExecutorConfig } from '../../../tools/components/configuration/PowerBIDaxExecutorConfigSelector';
 import { UCMetricViewGeneratorConfigSelector, UCMetricViewGeneratorConfig } from '../../../tools/components/configuration/UCMetricViewGeneratorConfigSelector';
-import { ConfigGeneratorConfigSelector, ConfigGeneratorConfig } from '../../../tools/components/configuration/ConfigGeneratorConfigSelector';
 import { BIExtractionToolConfigSections } from './BIExtractionToolConfigSections';
 import { GenieSpaceConfigSelector, GenieSpaceConfig } from '../../../tools/components/configuration/GenieSpaceConfigSelector';
 import { MetricViewDeployerConfigSelector, MetricViewDeployerConfig } from '../../../tools/components/configuration/MetricViewDeployerConfigSelector';
@@ -99,20 +92,13 @@ const TOOL_CONFIG_KEYS = [
   'PerplexityTool',
   'SerperDevTool',
   'Measure Conversion Pipeline',
-  'M-Query Conversion Pipeline',
-  'Power BI Relationships Tool',
   'Power BI Hierarchies Tool',
   'Power BI Field Parameters & Calculation Groups Tool',
   'Power BI Report References Tool',
-  'Power BI Semantic Model Fetcher',
-  'Power BI Semantic Model DAX Generator',
-  'Power BI Metadata Reducer',
   'Power BI DAX Executor',
   'UC Metric View Generator',
-  'Config Generator',
   'Pipeline Config Generator',
   'UCMV Drift Monitor',
-  'Power BI Comprehensive Analysis Tool',
 ] as const;
 
 const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved, onSubmit, isEdit, tools, hideTitle, isCreateMode, agent }) => {
@@ -1161,40 +1147,6 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
               </Box>
             )}
 
-            {/* Power BI Comprehensive Analysis Configuration - Show only when Power BI Comprehensive Analysis Tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Comprehensive Analysis Tool';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Power BI Comprehensive Analysis Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(25, 118, 210, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(25, 118, 210, 0.2)'
-                }}>
-                  <PowerBIAnalysisConfigSelector
-                    value={(toolConfigs['Power BI Comprehensive Analysis Tool'] || {}) as PowerBIAnalysisConfig}
-                    onChange={(config) => {
-                      setToolConfig('Power BI Comprehensive Analysis Tool', config);
-                      // Update tool configs when configuration changes
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Power BI Comprehensive Analysis Tool': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
             {/* Measure Conversion Pipeline Configuration - Show only when tool is selected */}
             {formData.tools.some(toolId => {
               const tool = tools.find(t =>
@@ -1222,74 +1174,6 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
                       setToolConfigs(prev => ({
                         ...prev,
                         'Measure Conversion Pipeline': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* M-Query Conversion Pipeline Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'M-Query Conversion Pipeline';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  M-Query Conversion Pipeline Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(25, 118, 210, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(25, 118, 210, 0.2)'
-                }}>
-                  <MQueryConverterConfigSelector
-                    value={(toolConfigs['M-Query Conversion Pipeline'] || {}) as MQueryConverterConfig}
-                    onChange={(config) => {
-                      setToolConfig('M-Query Conversion Pipeline', config);
-                      // Update tool configs when configuration changes
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'M-Query Conversion Pipeline': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* Power BI Relationships Tool Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Relationships Tool';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Power BI Relationships Tool Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(76, 175, 80, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(76, 175, 80, 0.2)'
-                }}>
-                  <PowerBIRelationshipsConfigSelector
-                    value={(toolConfigs['Power BI Relationships Tool'] || {}) as PowerBIRelationshipsConfig}
-                    onChange={(config) => {
-                      setToolConfig('Power BI Relationships Tool', config);
-                      // Update tool configs when configuration changes
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Power BI Relationships Tool': config
                       }));
                     }}
                   />
@@ -1392,105 +1276,6 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
                       setToolConfigs(prev => ({
                         ...prev,
                         'Power BI Report References Tool': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* Power BI Semantic Model Fetcher Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Semantic Model Fetcher';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Power BI Semantic Model Fetcher Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(255, 152, 0, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(255, 152, 0, 0.2)'
-                }}>
-                  <PowerBIFetcherConfigSelector
-                    value={(toolConfigs['Power BI Semantic Model Fetcher'] || {}) as PowerBIFetcherConfig}
-                    onChange={(config) => {
-                      setToolConfig('Power BI Semantic Model Fetcher', config);
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Power BI Semantic Model Fetcher': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* Power BI Semantic Model DAX Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Semantic Model DAX Generator';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Power BI Semantic Model DAX Generator Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(0, 121, 107, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(0, 121, 107, 0.2)'
-                }}>
-                  <PowerBIDaxConfigSelector
-                    value={(toolConfigs['Power BI Semantic Model DAX Generator'] || {}) as PowerBIDaxConfig}
-                    onChange={(config) => {
-                      setToolConfig('Power BI Semantic Model DAX Generator', config);
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Power BI Semantic Model DAX Generator': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* Power BI Metadata Reducer Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Metadata Reducer';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Power BI Metadata Reducer Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(156, 39, 176, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(156, 39, 176, 0.2)'
-                }}>
-                  <PowerBIMetadataReducerConfigSelector
-                    value={(toolConfigs['Power BI Metadata Reducer'] || {}) as PowerBIMetadataReducerConfig}
-                    onChange={(config) => {
-                      setToolConfig('Power BI Metadata Reducer', config);
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Power BI Metadata Reducer': config
                       }));
                     }}
                   />
@@ -1689,39 +1474,6 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
                       setToolConfigs(prev => ({
                         ...prev,
                         'Databricks Dashboard Creator': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
-
-            {/* Config Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Config Generator';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Config Generator (Tool 89) Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(76, 175, 80, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(76, 175, 80, 0.2)'
-                }}>
-                  <ConfigGeneratorConfigSelector
-                    value={(toolConfigs['Config Generator'] || {}) as ConfigGeneratorConfig}
-                    onChange={(config) => {
-                      setToolConfig('Config Generator', config);
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Config Generator': config
                       }));
                     }}
                   />

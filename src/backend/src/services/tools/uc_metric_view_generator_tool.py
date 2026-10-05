@@ -2319,8 +2319,7 @@ class UCMetricViewGeneratorTool(BaseTool):
         # 1b. Measure DAX fallback — the Execute Queries / XMLA path above is
         # frequently rejected for Service-Account (ROPC) tokens, yielding zero
         # measures. Recover via (a) Fabric TMDL (which an SA CAN read) and, if a
-        # client_secret is available, (b) a Service-Principal retry. Mirrors the
-        # Semantic Model Fetcher's TMDL→SP DAX strategy.
+        # client_secret is available, (b) a Service-Principal retry.
         if not result.get("measures"):
             recovered = self._extract_measures_fallback(
                 workspace_id=workspace_id,
@@ -2379,7 +2378,7 @@ class UCMetricViewGeneratorTool(BaseTool):
         # no fact table is detected and the generator emits 0 views even when
         # measures were extracted. Recover the table source expressions via
         # Fabric TMDL (SA-readable) or a Service-Principal retry, mirroring the
-        # measure fallback and the Semantic Model Fetcher.
+        # measure fallback.
         if not result.get("mquery"):
             recovered_mq = self._extract_mquery_fallback(
                 workspace_id=workspace_id,
