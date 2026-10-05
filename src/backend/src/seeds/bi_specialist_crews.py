@@ -262,7 +262,9 @@ PIPELINE_CONFIG_TASK = {
 
 PIPELINE_CONFIG_CREW = {
     "id": PIPELINE_CONFIG_CREW_ID,
-    "name": "UCMV — Generate Pipeline Config (API-Direct)",
+    "name": "1 · Extract Power BI Model",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UCMV — Generate Pipeline Config (API-Direct)"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -379,7 +381,9 @@ UCMV_GEN_TASK = {
 
 UCMV_GEN_CREW = {
     "id": UCMV_GEN_CREW_ID,
-    "name": "UC Metric View Generator — JSON Mode",
+    "name": "2 · Convert to Metric Views",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UC Metric View Generator — JSON Mode"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -498,7 +502,9 @@ UCMV_GEN_RECON_TASK = {
 
 UCMV_GEN_RECON_CREW = {
     "id": UCMV_GEN_RECON_CREW_ID,
-    "name": "UC Metric View Generator — Reconciled (iterative PBI check)",
+    "name": "2 · Convert to Metric Views + Verify Numbers",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UC Metric View Generator — Reconciled (iterative PBI check)"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -585,7 +591,9 @@ UCMV_VAL_TASK = {
 
 UCMV_VAL_CREW = {
     "id": UCMV_VAL_CREW_ID,
-    "name": "UCMV Quality Validator",
+    "name": "3 · Review Metric View Quality",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UCMV Quality Validator"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -660,7 +668,9 @@ DEPLOYER_TASK = {
 
 DEPLOYER_CREW = {
     "id": DEPLOYER_CREW_ID,
-    "name": "Metric View Deployer",
+    "name": "4 · Deploy Metric Views",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["Metric View Deployer"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -741,7 +751,9 @@ REFERENCES_TASK = {
 
 REFERENCES_CREW = {
     "id": REFERENCES_CREW_ID,
-    "name": "references",
+    "name": "Find Report Fields & Visuals",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["references"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -823,7 +835,9 @@ MAPPER_TASK = {
 
 MAPPER_CREW = {
     "id": MAPPER_CREW_ID,
-    "name": "PBI Visual-UCMV Mapper",
+    "name": "Map Report Visuals to Metric Views",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["PBI Visual-UCMV Mapper"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -903,7 +917,9 @@ DASHBOARD_TASK = {
 
 DASHBOARD_CREW = {
     "id": DASHBOARD_CREW_ID,
-    "name": "Databricks Dashboard Creator",
+    "name": "Rebuild Report as AI/BI Dashboard",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["Databricks Dashboard Creator"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -983,7 +999,9 @@ GENIE_CFG_TASK = {
 
 GENIE_CFG_CREW = {
     "id": GENIE_CFG_CREW_ID,
-    "name": "UCMV Genie Space Config Generator",
+    "name": "Prepare Genie Space",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UCMV Genie Space Config Generator"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -1069,7 +1087,9 @@ GENIE_GEN_TASK = {
 
 GENIE_GEN_CREW = {
     "id": GENIE_GEN_CREW_ID,
-    "name": "Genie Space Generator",
+    "name": "Create Genie Space",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["Genie Space Generator"],
     "process": "sequential",
     "reasoning": False,
     "memory": False,
@@ -1174,7 +1194,9 @@ UCMV_REEVAL_TASK = {
 
 UCMV_REEVAL_CREW = {
     "id": UCMV_REEVAL_CREW_ID,
-    "name": "UCMV Re-evaluation",
+    "name": "Retry Failed Measures",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UCMV Re-evaluation"],
     "process": "sequential",
     "planning": False,
     "reasoning": False,
@@ -1200,7 +1222,7 @@ UCMV_REEVAL_CREW = {
 # of one report with the CURRENT Power BI model, and proposes a patch that only
 # adds new / re-translates changed measures (and the joins they need) on top of
 # the verified deployed YAML. Read-only — deploy the reviewed proposal with the
-# Metric View Deployer crew.
+# "4 · Deploy Metric Views" crew.
 
 UCMV_DRIFT_AGENT_ID = "bi-ucmv-drift-agent-001"
 UCMV_DRIFT_TASK_ID = "bi-ucmv-drift-task-001"
@@ -1289,7 +1311,9 @@ UCMV_DRIFT_TASK = {
 
 UCMV_DRIFT_CREW = {
     "id": UCMV_DRIFT_CREW_ID,
-    "name": "UCMV Drift Monitor",
+    "name": "Continuous Drift Monitor",
+    # Older seeded name(s) — renamed in place on existing installs.
+    "previous_names": ["UCMV Drift Monitor"],
     "process": "sequential",
     "planning": False,
     "reasoning": False,
@@ -1422,6 +1446,11 @@ async def _seed_crew(session, data: dict) -> None:
         # Agent Builder canvas forever — re-seeding never backfilled it. Fill the
         # nodes ONLY when the stored crew has none, so a crew the user has since
         # edited (and which therefore has nodes) is never clobbered.
+        # Rename a crew still carrying an OLDER seeded name. Matching the exact
+        # old name means a crew the user renamed themselves is left alone.
+        if getattr(existing, "name", None) in data.get("previous_names", []):
+            logger.info(f"Renamed crew: {existing.name!r} -> {data['name']!r}")
+            existing.name = data["name"]
         if not existing.nodes and seed_nodes:
             existing.nodes = seed_nodes
             existing.edges = seed_edges

@@ -69,3 +69,40 @@ async def test_creates_crew_when_absent():
     created = session.add.call_args.args[0]
     assert list(created.nodes) == _CREW["nodes"]
     assert list(created.edges) == _CREW["edges"]
+
+
+_RENAMED = {**_CREW, "name": "1 · New Name", "previous_names": ["Old Seeded Name"]}
+
+
+@pytest.mark.asyncio
+async def test_renames_crew_still_carrying_old_seeded_name():
+    existing = types.SimpleNamespace(
+        name="Old Seeded Name",
+        nodes=[{"id": "n"}],
+        edges=[],
+        agent_ids=["a1"],
+        task_ids=["t1"],
+    )
+    await bsc._seed_crew(_session_with(existing), _RENAMED)
+    assert existing.name == "1 · New Name"
+
+
+@pytest.mark.asyncio
+async def test_keeps_a_name_the_user_chose():
+    existing = types.SimpleNamespace(
+        name="My Sales Pipeline",
+        nodes=[{"id": "n"}],
+        edges=[],
+        agent_ids=["a1"],
+        task_ids=["t1"],
+    )
+    await bsc._seed_crew(_session_with(existing), _RENAMED)
+    assert existing.name == "My Sales Pipeline"
+
+
+def test_seeded_crew_names_are_unique_and_renames_cover_old_names():
+    names = [e["crew"]["name"] for e in bsc.ALL_CREWS]
+    assert len(names) == len(set(names))
+    old = [n for e in bsc.ALL_CREWS for n in e["crew"].get("previous_names", [])]
+    assert "UCMV — Generate Pipeline Config (API-Direct)" in old
+    assert not set(old) & set(names)  # an old name must never be a current one
