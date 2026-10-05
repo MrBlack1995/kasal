@@ -226,6 +226,12 @@ tools_data = [
         "Finds previously-untranslatable DAX measures that TODAY's improved transpiler can now recover. Replays stored conversion history (no PowerBI API call): for each dataset it compares the capability fingerprint of the original run against the current one, and re-tries ONLY the measures that failed back then. Reports which are now recoverable with their new SQL, the reason they failed before, and how many other measures depend on them. Read-only — proposes re-transpilation candidates, never modifies metric views. Deterministic by default (no LLM tokens); set use_llm=true to also try the LLM-first path. Skips permanent-limitation categories (display artifacts, slicer scalars, prior-year) and measures a reviewer already dismissed. Schedule it or trigger manually after shipping transpiler improvements.",
         "database",
     ),
+    (
+        98,
+        "UCMV Drift Monitor",
+        "Keeps deployed Unity Catalog metric views in sync with the Power BI semantic model they were generated from. Reads each monitored view's DEPLOYED YAML as the verified baseline, extracts today's measures from Power BI (same APIs and credentials as the Pipeline Config Generator; visuals are not compared), and classifies every measure: unchanged, changed in PBI, new in PBI, removed from PBI, or unassigned. New and changed measures are translated DAX→SQL (LLM fallback) and appended to the baseline YAML without touching anything else — a structural check rejects any patch that alters the verified view. Change detection is exact for views generated with DAX fingerprints; older views get an optional batched LLM comparison. Read-only: produces a proposal for the Metric View Deployer, never deploys.",
+        "database",
+    ),
 ]
 
 
@@ -644,6 +650,23 @@ def get_tool_configs():
             "parent_path": "/Workspace/Shared",
             "publish_dashboard": True,
         },  # Databricks Dashboard Creator
+        "98": {
+            "result_as_answer": True,
+            "ucmv_names": "",
+            "warehouse_id": "",
+            "databricks_host": "",
+            "workspace_id": "",
+            "dataset_id": "",
+            "report_id": "",
+            "tenant_id": "",
+            "client_id": "",
+            "client_secret": "",
+            "admin_client_id": "",
+            "admin_client_secret": "",
+            "llm_compare_legacy": True,
+            "apply_suspected_changes": False,
+            "llm_model": "databricks-claude-sonnet-4-5",
+        },  # UCMV Drift Monitor
     }
 
 

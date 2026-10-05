@@ -22,6 +22,9 @@ And one STANDALONE crew, outside that flow:
      models and re-tries only the measures that failed then, using today's improved
      transpiler. Run manually or on a schedule after shipping transpiler improvements.
      Read-only: it proposes re-transpilation candidates, never modifies metric views.
+ 11. UCMV Drift Monitor              (tool 98) — compares DEPLOYED metric views with
+     the CURRENT Power BI model and proposes a patch that only adds new / updates
+     changed measures on top of the verified YAML. Read-only.
 
 Credential/input placeholders are left empty so the user only needs to fill in
 their workspace_id, client_id, client_secret, catalog, schema, warehouse_id etc.
@@ -43,8 +46,8 @@ from src.models.task import Task
 # Tools required by the PBI migration pipeline — pre-enabled for bi-specialist.
 # These become GroupTool rows (explicit (group_id, tool_id) eligibility), so a
 # tool missing here is filtered out of the workspace's Tools list and the crew UI.
-# 97 = UCMV Re-evaluation (the standalone recovery crew below).
-BI_TOOLS = [78, 86, 88, 90, 91, 92, 93, 94, 95, 97]
+# 97 = UCMV Re-evaluation, 98 = UCMV Drift Monitor (the standalone crews below).
+BI_TOOLS = [78, 86, 88, 90, 91, 92, 93, 94, 95, 97, 98]
 
 logger = logging.getLogger(__name__)
 
@@ -1191,6 +1194,119 @@ UCMV_REEVAL_CREW = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Crew 11 — UCMV Drift Monitor (deployed views vs today's Power BI model)
+# ─────────────────────────────────────────────────────────────────────────────
+# STANDALONE, run manually or on a schedule: compares 1..N deployed metric views
+# of one report with the CURRENT Power BI model, and proposes a patch that only
+# adds new / re-translates changed measures (and the joins they need) on top of
+# the verified deployed YAML. Read-only — deploy the reviewed proposal with the
+# Metric View Deployer crew.
+
+UCMV_DRIFT_AGENT_ID = "bi-ucmv-drift-agent-001"
+UCMV_DRIFT_TASK_ID = "bi-ucmv-drift-task-001"
+UCMV_DRIFT_CREW_ID = "bi-ucmv-drift-crew-001"
+
+UCMV_DRIFT_AGENT = {
+    "id": UCMV_DRIFT_AGENT_ID,
+    "name": "UCMV Drift Monitor Agent",
+    "role": "Metric View Drift Analyst",
+    "goal": (
+        "Detect where deployed UC metric views have drifted from their Power BI model "
+        "and propose a minimal patch that brings them back in sync."
+    ),
+    "backstory": (
+        "You keep governed metric views aligned with the Power BI reports they were "
+        "migrated from. The deployed metric view is the verified baseline: you never "
+        "change what a human already verified, you only add what Power BI gained and "
+        "update what Power BI changed. "
+        "Call the UCMV Drift Monitor tool with ZERO arguments — the metric views, Power "
+        "BI credentials and warehouse are pre-configured in the tool task form. Report "
+        "the findings verbatim; do NOT invent SQL and do NOT claim anything was deployed."
+    ),
+    "llm": "databricks-claude-opus-4-8",
+    "tools": [],
+    "tool_configs": {},
+    "max_iter": 5,
+    "max_rpm": 10,
+    "max_execution_time": 1800,
+    "verbose": True,
+    "allow_delegation": False,
+    "cache": True,
+    "memory": False,
+    "embedder_config": DEFAULT_EMBEDDER,
+    "max_retry_limit": 3,
+}
+
+UCMV_DRIFT_TASK = {
+    "id": UCMV_DRIFT_TASK_ID,
+    "name": "Detect drift between deployed metric views and Power BI",
+    "description": (
+        "Compare the deployed UC metric views with the CURRENT Power BI semantic model "
+        "and propose the changes needed to bring them back in sync.\n\n"
+        "⚠️ CRITICAL: Call the UCMV Drift Monitor tool with ZERO arguments — the metric "
+        "view names, Power BI credentials and SQL warehouse are supplied by the tool "
+        "config.\n\n"
+        "The tool is READ-ONLY. It returns, per metric view, which measures are "
+        "unchanged, changed in Power BI, new in Power BI, removed from Power BI or "
+        "unassigned, plus a proposed YAML that keeps the deployed definition intact and "
+        "only appends new / re-translated measures and needed joins. Return its report "
+        "as-is. If nothing drifted, say so plainly — that is a valid result."
+    ),
+    "expected_output": (
+        "A JSON drift report: per-view measure statuses (with today's DAX, the deployed "
+        "SQL and any proposed SQL), the proposed YAML per view, unassigned measures, and "
+        "a summary of what changed vs what was added."
+    ),
+    "agent_id": UCMV_DRIFT_AGENT_ID,
+    "tools": ["98"],
+    "tool_configs": {
+        "UCMV Drift Monitor": {
+            "result_as_answer": True,
+            # 1..N deployed metric views of ONE report: catalog.schema.view, one per line.
+            "ucmv_names": "",
+            "warehouse_id": "",
+            "databricks_host": "",
+            # Power BI connection — same fields as the Pipeline Config Generator.
+            "workspace_id": "",
+            "dataset_id": "",
+            "report_id": "",
+            "tenant_id": "",
+            "client_id": "",
+            "client_secret": "",
+            "admin_client_id": "",
+            "admin_client_secret": "",
+            # Views deployed before DAX fingerprinting: batched LLM comparison of
+            # today's DAX vs the deployed SQL. Costs tokens; turn off for a free sweep.
+            "llm_compare_legacy": True,
+            # LLM-suspected changes are shown with a suggested replacement but only
+            # patched into the proposal when this is on.
+            "apply_suspected_changes": False,
+            "llm_model": "databricks-claude-sonnet-4-5",
+        }
+    },
+    "config": DEFAULT_TASK_CONFIG,
+}
+
+UCMV_DRIFT_CREW = {
+    "id": UCMV_DRIFT_CREW_ID,
+    "name": "UCMV Drift Monitor",
+    "process": "sequential",
+    "planning": False,
+    "reasoning": False,
+    "memory": False,
+    "verbose": True,
+    "agent_ids": [UCMV_DRIFT_AGENT_ID],
+    "task_ids": [UCMV_DRIFT_TASK_ID],
+    "nodes": [
+        _agent_node(UCMV_DRIFT_AGENT_ID, UCMV_DRIFT_AGENT, 68, 68),
+        _task_node(UCMV_DRIFT_TASK_ID, UCMV_DRIFT_AGENT_ID, UCMV_DRIFT_TASK, 368, 68),
+    ],
+    "edges": [
+        _agent_to_task_edge("ucmv-drift", UCMV_DRIFT_AGENT_ID, UCMV_DRIFT_TASK_ID)
+    ],
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # All crews (ordered for seeding)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1215,6 +1331,7 @@ ALL_CREWS = [
     {"crew": GENIE_GEN_CREW, "agent": GENIE_GEN_AGENT, "task": GENIE_GEN_TASK},
     # Standalone (not part of the conversion flow) — run manually or on a schedule.
     {"crew": UCMV_REEVAL_CREW, "agent": UCMV_REEVAL_AGENT, "task": UCMV_REEVAL_TASK},
+    {"crew": UCMV_DRIFT_CREW, "agent": UCMV_DRIFT_AGENT, "task": UCMV_DRIFT_TASK},
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

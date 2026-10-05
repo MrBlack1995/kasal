@@ -58,7 +58,7 @@ import { PowerBIMetadataReducerConfigSelector, PowerBIMetadataReducerConfig } fr
 import { PowerBIDaxExecutorConfigSelector, PowerBIDaxExecutorConfig } from '../../../tools/components/configuration/PowerBIDaxExecutorConfigSelector';
 import { UCMetricViewGeneratorConfigSelector, UCMetricViewGeneratorConfig } from '../../../tools/components/configuration/UCMetricViewGeneratorConfigSelector';
 import { ConfigGeneratorConfigSelector, ConfigGeneratorConfig } from '../../../tools/components/configuration/ConfigGeneratorConfigSelector';
-import { PipelineConfigGeneratorConfigSelector, PipelineConfigGeneratorConfig } from '../../../tools/components/configuration/PipelineConfigGeneratorConfigSelector';
+import { BIExtractionToolConfigSections } from './BIExtractionToolConfigSections';
 import { GenieSpaceConfigSelector, GenieSpaceConfig } from '../../../tools/components/configuration/GenieSpaceConfigSelector';
 import { MetricViewDeployerConfigSelector, MetricViewDeployerConfig } from '../../../tools/components/configuration/MetricViewDeployerConfigSelector';
 import { UCMVGenieConfigGeneratorConfigSelector, UCMVGenieConfigGeneratorConfig } from '../../../tools/components/configuration/UCMVGenieConfigGeneratorConfigSelector';
@@ -111,6 +111,7 @@ const TOOL_CONFIG_KEYS = [
   'UC Metric View Generator',
   'Config Generator',
   'Pipeline Config Generator',
+  'UCMV Drift Monitor',
   'Power BI Comprehensive Analysis Tool',
 ] as const;
 
@@ -1728,38 +1729,12 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
               </Box>
             )}
 
-            {/* Pipeline Config Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Pipeline Config Generator';
-            }) && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Pipeline Config Generator (Tool 90) Configuration
-                </Typography>
-                <Box sx={{
-                  p: 2,
-                  backgroundColor: 'rgba(25, 118, 210, 0.04)',
-                  borderRadius: 1,
-                  border: '1px solid rgba(25, 118, 210, 0.2)'
-                }}>
-                  <PipelineConfigGeneratorConfigSelector
-                    value={(toolConfigs['Pipeline Config Generator'] || {}) as PipelineConfigGeneratorConfig}
-                    onChange={(config) => {
-                      setToolConfig('Pipeline Config Generator', config);
-                      setToolConfigs(prev => ({
-                        ...prev,
-                        'Pipeline Config Generator': config
-                      }));
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
+            {/* Pipeline Config Generator (90) + UCMV Drift Monitor (98) */}
+            <BIExtractionToolConfigSections
+              isToolSelected={isToolSelected}
+              toolConfigs={toolConfigs}
+              setToolConfig={setToolConfig}
+            />
 
             {/* Genie Space Generator Configuration - Show only when tool is selected */}
             {formData.tools.some(toolId => {

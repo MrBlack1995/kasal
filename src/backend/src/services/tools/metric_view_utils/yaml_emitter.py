@@ -12,6 +12,7 @@ import logging
 import re
 
 from .data_classes import MetricViewSpec
+from .drift.fingerprint import dax_fingerprint
 from .metadata_generator import MetadataGenerator
 from .utils import col_to_readable, spark_sql_compat
 
@@ -1087,6 +1088,12 @@ def emit_yaml(
             if not dax_comment:
                 if m.original_name != m.measure_name:
                     dax_comment = f"PBI: {m.original_name}"
+                # Source-DAX fingerprint, early in the comment so UC's 4000-char
+                # truncation never drops it — the drift monitor compares it with
+                # today's DAX to detect a measure changed in Power BI.
+                _fp = dax_fingerprint(getattr(m, "dax_expression", "") or "")
+                if _fp:
+                    dax_comment = f"{dax_comment} · {_fp}" if dax_comment else _fp
                 dax_comment += _provenance_suffix(m)
                 # M11: a semi-additive (latest-period) measure is NOT additive over
                 # its order column — flag it so a reviewer/Genie doesn't sum it

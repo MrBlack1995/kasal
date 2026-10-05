@@ -54,6 +54,8 @@ import ValidatorResultViewer, { isValidatorResult } from './ValidatorResultViewe
 import ConfigGenResultView, { isPipelineConfigResult } from './ConfigGenResultView';
 import BIArtifactsView from './BIArtifactsView';
 import ReevaluationResultViewer, { isReevaluationResult } from './ReevaluationResultViewer';
+import DriftResultViewer from './drift/DriftResultViewer';
+import { isDriftResult } from './drift/driftResult';
 import { runService } from '../../../api/execution/ExecutionHistoryService';
 
 const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
@@ -721,6 +723,8 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
         try {
           const inner = JSON.parse(contentEntries[0][1] as string);
           if (typeof inner === 'object' && inner !== null) {
+            // Before isUCMVResult: the drift report carries a `yaml` key for the deployer handoff.
+            if (isDriftResult(inner)) return <DriftResultViewer result={inner} />;
             if (isUCMVResult(inner)) {
               return run?.job_id
                 ? <UCMVResultWithAutoSave result={inner as Parameters<typeof UCMVResultViewer>[0]['result']} jobId={run.job_id} savedJobRef={autoSavedUcmvJobRef} onSave={handleSaveUcmvResult} />
@@ -738,6 +742,8 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
           }
         } catch { /* not JSON */ }
       }
+
+      if (isDriftResult(parsed)) return <DriftResultViewer result={parsed} />;
 
       // UCMV Builder result: structured metric-view display
       if (isUCMVResult(parsed)) {
@@ -794,6 +800,7 @@ const ShowResult = memo<ShowResultProps>(({ open, onClose, result, run }) => {
               if (typeof value === 'string' && value.trim().startsWith('{')) {
                 try {
                   const innerParsed = JSON.parse(value);
+                  if (isDriftResult(innerParsed)) return <DriftResultViewer result={innerParsed} />;
                   if (isValidatorResult(innerParsed)) {
                     return <ValidatorResultViewer result={innerParsed as Parameters<typeof ValidatorResultViewer>[0]['result']} jobId={run?.job_id} />;
                   }

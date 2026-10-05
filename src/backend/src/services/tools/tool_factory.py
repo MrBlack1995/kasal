@@ -198,6 +198,12 @@ except ImportError as e:
     UCMVReevaluationTool = None
     logging.warning(f"Could not import UCMVReevaluationTool: {e}")
 
+try:
+    from .ucmv_drift_monitor_tool import UCMVDriftMonitorTool
+except ImportError as e:
+    UCMVDriftMonitorTool = None
+    logging.warning(f"Could not import UCMVDriftMonitorTool: {e}")
+
 # Config Generator Tool
 try:
     from .config_generator_tool import ConfigGeneratorTool
@@ -362,6 +368,8 @@ class ToolFactory:
             )
         if UCMVReevaluationTool is not None:
             self._tool_implementations["UCMV Re-evaluation"] = UCMVReevaluationTool
+        if UCMVDriftMonitorTool is not None:
+            self._tool_implementations["UCMV Drift Monitor"] = UCMVDriftMonitorTool
         if ConfigGeneratorTool is not None:
             self._tool_implementations["Config Generator"] = ConfigGeneratorTool
         if PipelineConfigGeneratorTool is not None:
