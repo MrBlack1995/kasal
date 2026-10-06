@@ -23,7 +23,7 @@ Logic lives in ``metric_view_utils/drift/``; this class only wires real I/O into
 
 import json
 import logging
-from typing import Any, Optional, Type
+from typing import Any, ClassVar, Optional, Tuple, Type
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
@@ -115,6 +115,9 @@ class UCMVDriftMonitorTool(BaseTool):
     )
     args_schema: Type[BaseModel] = UCMVDriftMonitorSchema
     _default_config: dict = PrivateAttr(default_factory=dict)
+    #: Parameters a skill attached to the agent may fill (Configuration → Skills,
+    #: tagged ``kasal-tool-param``) — see execution/kernel/skill_tool_context.py.
+    skill_context_params: ClassVar[Tuple[str, ...]] = ("domain_context",)
 
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
 

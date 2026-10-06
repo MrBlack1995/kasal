@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import urllib.parse
-from typing import Any, Optional, Type
+from typing import Any, ClassVar, Optional, Tuple, Type
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -77,7 +77,9 @@ class UCMetricViewGeneratorSchema(BaseModel):
             "business/metric vocabulary, naming conventions, fiscal-calendar "
             "quirks (e.g. 4-4-5), cost-accounting terms — fed verbatim into the "
             "DAX→SQL translation prompt so the LLM translates with the model's "
-            "business semantics. Paste a README/notes blurb; blank = none. Only "
+            "business semantics. Normally filled from a Skill attached to the "
+            "agent (Configuration → Skills, tagged kasal-tool-param: "
+            "domain_context); a value here is kept after the skill text. Only "
             "used when LLM fallback is on."
         ),
     )
@@ -221,6 +223,9 @@ class UCMetricViewGeneratorTool(BaseTool):
     )
     args_schema: Type[BaseModel] = UCMetricViewGeneratorSchema
     _default_config: dict = PrivateAttr(default_factory=dict)
+    #: Parameters a skill attached to the agent may fill (Configuration → Skills,
+    #: tagged ``kasal-tool-param``) — see execution/kernel/skill_tool_context.py.
+    skill_context_params: ClassVar[Tuple[str, ...]] = ("domain_context",)
 
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
 

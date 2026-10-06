@@ -22,6 +22,8 @@ import { useTaskExecutionStore } from '../../../../store/taskExecutionStore';
 import { useUILayoutStore } from '../../../../store/uiLayout';
 import { useErrorStore } from '../../../../store/error';
 import { findTaskStoreKey } from '../../../../utils/taskIdUtils';
+import { useAgentStore } from '../../../../store/agent';
+import { type Agent } from '../../../../types/workflow/agent';
 
 import { type LLMGuardrailConfig } from '../../../../types/workflow/task';
 
@@ -99,6 +101,23 @@ interface TaskNodeProps {
 const TaskNode: React.FC<TaskNodeProps> = ({ data, id }) => {
   const { setNodes, setEdges, getNodes, getEdges } = useReactFlow();
   const [isEditing, setIsEditing] = useState(false);
+  const getAgent = useAgentStore(state => state.getAgent);
+  // The agent wired to this task on the canvas — its skills feed task tools
+  // (e.g. the UCMV generator's domain context), so the form shows them.
+  const [assignedAgent, setAssignedAgent] = useState<Agent | undefined>();
+  useEffect(() => {
+    if (!isEditing) return;
+    const nodes = getNodes();
+    const agentNode = getEdges()
+      .filter(edge => edge.target === id)
+      .map(edge => nodes.find(node => node.id === edge.source))
+      .find(node => node?.type === 'agentNode');
+    const agentId = agentNode?.data?.agentId;
+    if (!agentId) { setAssignedAgent(undefined); return; }
+    let cancelled = false;
+    void getAgent(String(agentId)).then(agent => { if (!cancelled) setAssignedAgent(agent ?? undefined); });
+    return () => { cancelled = true; };
+  }, [isEditing, id, getNodes, getEdges, getAgent]);
   const [isToolDialogOpen, setIsToolDialogOpen] = useState(false);
   const [toolDialogInitialTab, setToolDialogInitialTab] = useState(0);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
@@ -795,6 +814,7 @@ const TaskNode: React.FC<TaskNodeProps> = ({ data, id }) => {
       <BuilderNodeEditor open={isEditing} kind="task" nodeId={id} label={String(data.label || 'Task')}
         onClose={() => setIsEditing(false)}>
             <TaskForm
+              agent={assignedAgent}
               initialData={handlePrepareTaskData()}
               onCancel={() => setIsEditing(false)}
               onTaskSaved={(savedTask) => {

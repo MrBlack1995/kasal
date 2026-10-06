@@ -25,6 +25,8 @@ import { UcmvLearningService, UcmvLearnResponse } from '../../../../api/tools/Uc
 interface UCMVLearningPanelProps {
   /** Apply the distilled README into the Domain context field. */
   onApplyDomainContext: (readme: string) => void;
+  /** Label of the apply button. */
+  applyLabel?: string;
   disabled?: boolean;
 }
 
@@ -39,6 +41,7 @@ function viewNameFromFile(fileName: string): string {
 
 export const UCMVLearningPanel: React.FC<UCMVLearningPanelProps> = ({
   onApplyDomainContext,
+  applyLabel = 'Use as Domain context',
   disabled = false
 }) => {
   const [corrected, setCorrected] = React.useState<Record<string, string>>({});
@@ -107,7 +110,7 @@ export const UCMVLearningPanel: React.FC<UCMVLearningPanelProps> = ({
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mt: 1 }}>
       <Typography variant="caption" color="text.secondary">
         Already deployed corrected UCMVs? Upload them and we&apos;ll diff them against our
-        original output and draft the Domain context for you — the learning flywheel.
+        original output and draft the domain context for you — the learning flywheel.
       </Typography>
 
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
@@ -217,7 +220,7 @@ export const UCMVLearningPanel: React.FC<UCMVLearningPanelProps> = ({
               onClick={() => onApplyDomainContext(result.readme as string)}
               disabled={disabled}
             >
-              Use as Domain context
+              {applyLabel}
             </Button>
             <Button
               variant="outlined"

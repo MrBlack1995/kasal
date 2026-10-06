@@ -31,7 +31,7 @@ import UploadFileIcon from '@mui/icons-material/UploadFile';
 import ClearIcon from '@mui/icons-material/Clear';
 import { usePowerBIOAuth } from '../../../../hooks/usePowerBIOAuth';
 import { PowerBIReconConnectionFields } from './PowerBIReconConnectionFields';
-import { UCMVLearningPanel } from './UCMVLearningPanel';
+import { UCMVDomainContextHint } from './UCMVDomainContextHint';
 
 // Authentication method type
 export type PowerBIAuthMethod = 'service_principal' | 'service_account' | 'user_oauth';
@@ -84,12 +84,19 @@ interface UCMetricViewGeneratorConfigSelectorProps {
   value: UCMetricViewGeneratorConfig;
   onChange: (config: UCMetricViewGeneratorConfig) => void;
   disabled?: boolean;
+  /** Skills of the agent running this task — shows which domain-context skill applies. */
+  agentId?: string | number;
+  agentSkills?: string[];
+  agentName?: string;
 }
 
 export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGeneratorConfigSelectorProps> = ({
   value = {},
   onChange,
-  disabled = false
+  disabled = false,
+  agentId,
+  agentSkills,
+  agentName
 }) => {
   // OAuth hook for User OAuth authentication
   const { accessToken, isAuthenticated, signIn, signOut, userEmail, isLoading: oauthLoading, error: oauthError } = usePowerBIOAuth({
@@ -749,64 +756,20 @@ export const UCMetricViewGeneratorConfigSelector: React.FC<UCMetricViewGenerator
         </AccordionDetails>
       </Accordion>
 
-      {/* Domain context (customer-supplied) — fed into the DAX→SQL translation */}
+      {/* Domain context — authored as a Skill on the agent, fed to this tool */}
       <Accordion sx={{ mt: 1 }}>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-          <Typography variant="subtitle2">
-            Domain context (optional){value.domain_context ? ' ✓' : ''}
-          </Typography>
+          <Typography variant="subtitle2">Domain context (Skills)</Typography>
         </AccordionSummary>
         <AccordionDetails>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-            <Typography variant="caption" color="text.secondary">
-              Paste your model&apos;s domain knowledge — business/metric vocabulary, naming
-              conventions, fiscal-calendar quirks, cost-accounting terms. It&apos;s fed verbatim into
-              the DAX→SQL translation so the LLM translates with your business semantics (needs LLM
-              fallback on). The greyed text is a template showing the shape — type over it, or clear
-              it for a blank field.
-            </Typography>
-            <TextField
-              label="Domain context"
-              value={value.domain_context || ''}
-              onChange={(e) => handleFieldChange('domain_context', e.target.value)}
-              disabled={disabled}
-              fullWidth
-              multiline
-              rows={14}
-              size="small"
-              placeholder={`# Domain context — <your model / report name>
-
-Fiscal calendar: describe it (e.g. 4-4-5). Define how "YTD <year>" is computed
-(e.g. periods 001..latest closed month) and any period-column overrides
-(e.g. latest_month_label → IsCurrentMonth).
-
-Vocabulary / acronyms (one per line):
-- <ACRONYM> = <what it means in this model>
-- <ACRONYM> = <what it means in this model>
-
-Measure / naming conventions:
-- Scenario suffixes, e.g. "… PY" = prior year, "… Bud" = budget, "… Act" = actual.
-- Units, e.g. volumes are counts unless suffixed _hl (hectolitres).
-- Business rules, e.g. prefer booked/stored columns over recomputing from components.
-
-Key dimensions and their members:
-- <dimension>: '<member1>','<member2>', …
-- Regions / entities: '<region1>','<region2>', …`}
-              helperText="Optional free text (README/notes style). Leave blank to use none."
-              InputProps={{
-                sx: { fontFamily: 'monospace', fontSize: '0.75rem' }
-              }}
-            />
-            <Divider sx={{ my: 1 }}>
-              <Typography variant="caption" color="text.secondary">
-                or learn it from deployed UCMVs
-              </Typography>
-            </Divider>
-            <UCMVLearningPanel
-              onApplyDomainContext={(readme) => handleFieldChange('domain_context', readme)}
-              disabled={disabled}
-            />
-          </Box>
+          <UCMVDomainContextHint
+            agentId={agentId}
+            agentSkills={agentSkills}
+            agentName={agentName}
+            inlineValue={value.domain_context}
+            onClearInline={() => onChange({ ...value, domain_context: undefined })}
+            disabled={disabled}
+          />
         </AccordionDetails>
       </Accordion>
 

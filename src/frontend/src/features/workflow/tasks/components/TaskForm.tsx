@@ -946,14 +946,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Genie Space Display - Show only when GenieTool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'GenieTool';
-            }) && (
+            {isToolSelected('GenieTool') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>Genie Space</Typography>
                 {selectedGenieSpace ? (
@@ -1015,14 +1008,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* AgentBricks Endpoint Display - Show only when AgentBricksTool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'AgentBricksTool';
-            }) && (
+            {isToolSelected('AgentBricksTool') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>AgentBricks Endpoint</Typography>
                 {selectedAgentBricksEndpoint ? (
@@ -1074,14 +1060,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Perplexity Configuration - Show only when PerplexityTool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'PerplexityTool';
-            }) && (
+            {isToolSelected('PerplexityTool') && (
               <Box sx={{ mt: 2 }}>
                 <PerplexityConfigSelector
                   value={(toolConfigs['PerplexityTool'] || {}) as PerplexityConfig}
@@ -1101,14 +1080,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Serper Configuration - Show only when SerperDevTool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'SerperDevTool';
-            }) && (
+            {isToolSelected('SerperDevTool') && (
               <Box sx={{ mt: 2 }}>
                 <SerperConfigSelector
                   value={(toolConfigs['SerperDevTool'] || {}) as SerperConfig}
@@ -1148,14 +1120,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Measure Conversion Pipeline Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Measure Conversion Pipeline';
-            }) && (
+            {isToolSelected('Measure Conversion Pipeline') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Measure Conversion Pipeline Configuration
@@ -1182,14 +1147,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Power BI Hierarchies Tool Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Hierarchies Tool';
-            }) && (
+            {isToolSelected('Power BI Hierarchies Tool') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Power BI Hierarchies Tool Configuration
@@ -1216,14 +1174,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Power BI Field Parameters & Calculation Groups Tool Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Field Parameters & Calculation Groups Tool';
-            }) && (
+            {isToolSelected('Power BI Field Parameters & Calculation Groups Tool') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Power BI Field Parameters & Calculation Groups Tool Configuration
@@ -1250,14 +1201,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Power BI Report References Tool Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI Report References Tool';
-            }) && (
+            {isToolSelected('Power BI Report References Tool') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Power BI Report References Tool Configuration
@@ -1284,14 +1228,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Power BI DAX Executor Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Power BI DAX Executor';
-            }) && (
+            {isToolSelected('Power BI DAX Executor') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Power BI DAX Executor Configuration
@@ -1317,14 +1254,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* UC Metric View Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'UC Metric View Generator';
-            }) && (
+            {isToolSelected('UC Metric View Generator') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   UC Metric View Generator Configuration
@@ -1336,6 +1266,9 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
                   border: '1px solid rgba(156, 39, 176, 0.2)'
                 }}>
                   <UCMetricViewGeneratorConfigSelector
+                    agentId={agent?.id}
+                    agentSkills={agent ? agent.skills ?? [] : undefined}
+                    agentName={agent?.name}
                     value={(toolConfigs['UC Metric View Generator'] || {}) as UCMetricViewGeneratorConfig}
                     onChange={(config) => {
                       setToolConfig('UC Metric View Generator', config);
@@ -1350,14 +1283,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Metric View Deployer Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Metric View Deployer';
-            }) && (
+            {isToolSelected('Metric View Deployer') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Metric View Deployer (Tool 88) Configuration
@@ -1383,14 +1309,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* UCMV Genie Space Config Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'UCMV Genie Space Config Generator';
-            }) && (
+            {isToolSelected('UCMV Genie Space Config Generator') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   UCMV Genie Space Config Generator (Tool 93) Configuration
@@ -1416,14 +1335,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* PBI Visual-UCMV Mapper Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'PBI Visual-UCMV Mapper';
-            }) && (
+            {isToolSelected('PBI Visual-UCMV Mapper') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   PBI Visual-UCMV Mapper (Tool 94) Configuration
@@ -1449,14 +1361,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             )}
 
             {/* Databricks Dashboard Creator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Databricks Dashboard Creator';
-            }) && (
+            {isToolSelected('Databricks Dashboard Creator') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Databricks Dashboard Creator (Tool 95) Configuration
@@ -1489,14 +1394,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ initialData, onCancel, onTaskSaved,
             />
 
             {/* Genie Space Generator Configuration - Show only when tool is selected */}
-            {formData.tools.some(toolId => {
-              const tool = tools.find(t =>
-                String(t.id) === String(toolId) ||
-                t.id === Number(toolId) ||
-                t.title === toolId
-              );
-              return tool?.title === 'Genie Space Generator';
-            }) && (
+            {isToolSelected('Genie Space Generator') && (
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                   Genie Space Generator (Tool 92) Configuration
